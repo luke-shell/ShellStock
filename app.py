@@ -19,6 +19,12 @@ try:
 except Exception:
     curl_requests = None
 
+try:
+    from supabase import Client, create_client
+except Exception:
+    Client = Any
+    create_client = None
+
 # Persistence file path
 PERSISTENCE_FILE = os.path.expanduser("~/.shellstock_data.json")
 
@@ -41,6 +47,147 @@ INTERVAL_OPTIONS = {
     "5 Years": {"period": "5y", "interval": "1wk"},
     "10 Years": {"period": "10y", "interval": "1mo"},
 }
+
+
+def _supabase_configured() -> bool:
+    if create_client is None:
+        return False
+
+    try:
+        secrets = st.secrets
+        url = secrets.get("SUPABASE_URL")
+        key = secrets.get("SUPABASE_ANON_KEY")
+        return bool(url and key)
+    except Exception:
+        return False
+
+
+def _get_supabase_client() -> Any:
+    if not _supabase_configured() or create_client is None:
+        return None
+
+    try:
+        return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_ANON_KEY"])
+    except Exception:
+        return None
+
+
+def _save_auth_session(auth_response: Any) -> bool:
+    session = getattr(auth_response, "session", None)
+    user = getattr(auth_response, "user", None)
+    if session is None or user is None:
+        return False
+
+    access_token = getattr(session, "access_token", None)
+    refresh_token = getattr(session, "refresh_token", None)
+    user_id = getattr(user, "id", None)
+    user_email = getattr(user, "email", "")
+
+    if not (access_token and refresh_token and user_id):
+        return False
+
+    st.session_state.supabase_access_token = access_token
+    st.session_state.supabase_refresh_token = refresh_token
+    st.session_state.supabase_user_id = user_id
+    st.session_state.supabase_user_email = user_email
+    return True
+
+
+def _clear_auth_session() -> None:
+    st.session_state.pop("supabase_access_token", None)
+    st.session_state.pop("supabase_refresh_token", None)
+    st.session_state.pop("supabase_user_id", None)
+    st.session_state.pop("supabase_user_email", None)
+
+
+def _supabase_user_id() -> str | None:
+    user_id = st.session_state.get("supabase_user_id")
+    return str(user_id) if user_id else None
+
+
+def _get_authenticated_supabase_client() -> Any:
+    client = _get_supabase_client()
+    if client is None:
+        return None
+
+    access_token = st.session_state.get("supabase_access_token")
+    refresh_token = st.session_state.get("supabase_refresh_token")
+    if not (access_token and refresh_token):
+        return None
+
+    try:
+        client.auth.set_session(access_token, refresh_token)
+        return client
+    except Exception:
+        return None
+
+
+def _sign_in_supabase(email: str, password: str) -> tuple[bool, str]:
+    client = _get_supabase_client()
+    if client is None:
+        return False, "Supabase client is not configured."
+
+    try:
+        response = client.auth.sign_in_with_password({"email": email, "password": password})
+    except Exception as error:
+        return False, str(error)
+
+    if _save_auth_session(response):
+        return True, "Signed in successfully."
+    return False, "Sign in failed. Check your email/password."
+
+
+def _sign_up_supabase(email: str, password: str) -> tuple[bool, str]:
+    client = _get_supabase_client()
+    if client is None:
+        return False, "Supabase client is not configured."
+
+    try:
+        response = client.auth.sign_up({"email": email, "password": password})
+    except Exception as error:
+        return False, str(error)
+
+    if _save_auth_session(response):
+        return True, "Account created and signed in."
+    return True, "Account created. Check your email for confirmation, then sign in."
+
+
+def _load_from_supabase() -> dict[str, Any]:
+    user_id = _supabase_user_id()
+    client = _get_authenticated_supabase_client()
+    if client is None:
+        return {}
+    if not user_id:
+        return {}
+
+    try:
+        response = (
+            client.table("shellstock_user_state")
+            .select("data_key,data_value")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        rows = response.data or []
+        return {row.get("data_key"): row.get("data_value") for row in rows if row.get("data_key")}
+    except Exception:
+        return {}
+
+
+def _save_to_supabase(data: dict[str, Any]) -> bool:
+    user_id = _supabase_user_id()
+    client = _get_authenticated_supabase_client()
+    if client is None:
+        return False
+    if not user_id:
+        return False
+
+    try:
+        payload = [{"user_id": user_id, "data_key": key, "data_value": value} for key, value in data.items()]
+        if payload:
+            client.table("shellstock_user_state").upsert(payload, on_conflict="user_id,data_key").execute()
+        return True
+    except Exception:
+        return False
 
 
 def apply_custom_theme() -> None:
@@ -210,6 +357,9 @@ def apply_custom_theme() -> None:
 
 def load_persistent_data() -> dict[str, Any]:
     """Load data from persistent storage file."""
+    if _supabase_configured():
+        return _load_from_supabase()
+
     if os.path.exists(PERSISTENCE_FILE):
         try:
             with open(PERSISTENCE_FILE, "r") as f:
@@ -221,6 +371,10 @@ def load_persistent_data() -> dict[str, Any]:
 
 def save_persistent_data(data: dict[str, Any]) -> None:
     """Save data to persistent storage file."""
+    if _supabase_configured():
+        _save_to_supabase(data)
+        return
+
     try:
         with open(PERSISTENCE_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -1617,9 +1771,74 @@ def render_alert_manager(default_symbol: str) -> list[str]:
     return pending_notifications
 
 
+def render_auth_gate() -> bool:
+    """Render a simple Supabase Auth gate when cloud persistence is enabled."""
+    if not _supabase_configured():
+        return True
+
+    if _supabase_user_id():
+        return True
+
+    st.title("ShellStock")
+    st.subheader("Sign in to access your saved data")
+    st.caption("Your holdings, watchlist, notes, alerts, and notification history are saved per user account.")
+
+    tab_sign_in, tab_sign_up = st.tabs(["Sign In", "Create Account"])
+
+    with tab_sign_in:
+        with st.form("supabase_sign_in_form"):
+            login_email = st.text_input("Email", key="supabase_login_email")
+            login_password = st.text_input("Password", type="password", key="supabase_login_password")
+            sign_in_submitted = st.form_submit_button("Sign In", use_container_width=True)
+
+        if sign_in_submitted:
+            ok, message = _sign_in_supabase(login_email.strip(), login_password)
+            if ok:
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+
+    with tab_sign_up:
+        with st.form("supabase_sign_up_form"):
+            signup_email = st.text_input("Email", key="supabase_signup_email")
+            signup_password = st.text_input("Password", type="password", key="supabase_signup_password")
+            sign_up_submitted = st.form_submit_button("Create Account", use_container_width=True)
+
+        if sign_up_submitted:
+            ok, message = _sign_up_supabase(signup_email.strip(), signup_password)
+            if ok:
+                st.success(message)
+                if _supabase_user_id():
+                    st.rerun()
+            else:
+                st.error(message)
+
+    return False
+
+
+def render_auth_sidebar_controls() -> None:
+    if not _supabase_configured():
+        return
+
+    user_email = st.session_state.get("supabase_user_email", "")
+    if user_email:
+        st.caption(f"Signed in as: {user_email}")
+    else:
+        st.caption("Signed in")
+
+    if st.button("Sign out", use_container_width=True, key="signout_btn"):
+        _clear_auth_session()
+        st.rerun()
+
+
 def main() -> None:
-    initialize_state()
     apply_custom_theme()
+
+    if _supabase_configured() and not render_auth_gate():
+        return
+
+    initialize_state()
 
     st.title("ShellStock")
     
@@ -1639,6 +1858,10 @@ def main() -> None:
         tab_controls, tab_holdings, tab_watchlist = st.tabs(["⚙️ Controls", "📊 My Holdings", "🔭 Watchlist"])
         
         with tab_controls:
+            backend_label = "Supabase (per-user)" if _supabase_configured() else "Local JSON"
+            st.caption(f"Storage backend: {backend_label}")
+            render_auth_sidebar_controls()
+
             # Refresh + auto-refresh compact row
             rcol1, rcol2 = st.columns([2, 1])
             with rcol1:

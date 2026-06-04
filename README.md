@@ -28,6 +28,40 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Streamlit Cloud Persistent Storage (Supabase)
+
+This app supports two storage backends:
+
+- Local JSON fallback (for local development)
+- Supabase Postgres with per-user isolation (recommended for Streamlit Cloud)
+
+### 1) Create Supabase table
+
+Run the SQL in [supabase_schema.sql](supabase_schema.sql) once in Supabase SQL Editor.
+
+### 2) Add Streamlit Secrets
+
+In Streamlit Cloud app settings, add:
+
+```toml
+SUPABASE_URL = "https://YOUR-PROJECT.supabase.co"
+SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY"
+```
+
+When these secrets are present, the app uses Supabase and requires user sign-in.
+
+### 3) Authentication and data isolation
+
+- Users sign in using Supabase Auth directly in the app.
+- All saved data is stored in `shellstock_user_state` keyed by `user_id`.
+- Row Level Security (RLS) policies ensure each user can only access their own rows.
+
+### 4) Security notes
+
+- Data in Supabase persists across Streamlit app restarts and redeploys.
+- Do not commit secrets into the repository.
+- In Supabase Auth, disable open signups if you want invite-only access.
+
 ## Notes
 
 - Data is sourced from Yahoo Finance through the `yfinance` package.
