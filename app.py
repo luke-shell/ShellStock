@@ -319,6 +319,12 @@ def initialize_state() -> None:
             persisted_note_saved_at = {}
         st.session_state.symbol_note_saved_at = persisted_note_saved_at
 
+    if "notification_history" not in st.session_state:
+        persisted_notification_history = get_persistent_data_key("notification_history", [])
+        if not isinstance(persisted_notification_history, list):
+            persisted_notification_history = []
+        st.session_state.notification_history = persisted_notification_history
+
 
 def safe_number(value: Any) -> float | None:
     if value is None:
@@ -1367,6 +1373,20 @@ def send_in_app_alert(title: str, message_body: str) -> tuple[bool, str]:
         # Streamlit toast is cross-platform and stays inside the app.
         if hasattr(st, "toast"):
             st.toast(full_message, icon="🔔")
+
+        history = st.session_state.get("notification_history", [])
+        history.insert(
+            0,
+            {
+                "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "title": title,
+                "message": message_body,
+                "status": "active",
+            },
+        )
+        st.session_state.notification_history = history[:500]
+        set_persistent_data_key("notification_history", st.session_state.notification_history)
         return True, "In-app notification shown"
     except Exception as error:
         return False, str(error)
@@ -1518,6 +1538,78 @@ def render_alert_manager(default_symbol: str) -> list[str]:
             st.rerun()
     else:
         st.info("No alerts created yet.")
+
+    st.markdown("### Notification center")
+    history: list[dict[str, Any]] = st.session_state.get("notification_history", [])
+    if not history:
+        st.info("No notifications yet.")
+    else:
+        status_filter = st.radio(
+            "Show",
+            options=["Active", "Archived", "All"],
+            horizontal=True,
+            key="notification_filter",
+        )
+
+        if status_filter == "Active":
+            filtered_notifications = [item for item in history if item.get("status", "active") == "active"]
+        elif status_filter == "Archived":
+            filtered_notifications = [item for item in history if item.get("status") == "archived"]
+        else:
+            filtered_notifications = history
+
+        if not filtered_notifications:
+            st.caption("No notifications match this filter.")
+        else:
+            display_rows = []
+            for idx, item in enumerate(filtered_notifications):
+                display_rows.append(
+                    {
+                        "#": idx,
+                        "When": item.get("created_at", ""),
+                        "Status": item.get("status", "active"),
+                        "Title": item.get("title", ""),
+                        "Message": item.get("message", ""),
+                    }
+                )
+            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+
+            selected_note_index = st.number_input(
+                "Notification index to manage",
+                min_value=0,
+                max_value=max(0, len(filtered_notifications) - 1),
+                value=0,
+                step=1,
+                key="selected_notification_index",
+            )
+
+            action_col_1, action_col_2, action_col_3 = st.columns(3)
+            selected_item = filtered_notifications[int(selected_note_index)]
+            selected_id = selected_item.get("id")
+
+            if action_col_1.button("Archive selected", use_container_width=True):
+                for item in history:
+                    if item.get("id") == selected_id:
+                        item["status"] = "archived"
+                        break
+                st.session_state.notification_history = history
+                set_persistent_data_key("notification_history", history)
+                st.rerun()
+
+            if action_col_2.button("Unarchive selected", use_container_width=True):
+                for item in history:
+                    if item.get("id") == selected_id:
+                        item["status"] = "active"
+                        break
+                st.session_state.notification_history = history
+                set_persistent_data_key("notification_history", history)
+                st.rerun()
+
+            if action_col_3.button("Delete selected", use_container_width=True):
+                history = [item for item in history if item.get("id") != selected_id]
+                st.session_state.notification_history = history
+                set_persistent_data_key("notification_history", history)
+                st.rerun()
 
     pending_notifications: list[str] = []
     if st.button("Run alert scan now", type="primary"):
