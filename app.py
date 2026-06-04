@@ -184,8 +184,7 @@ def apply_custom_theme() -> None:
             .js-plotly-plot .legend text,
             .js-plotly-plot .gtitle,
             .js-plotly-plot .xtick text,
-            .js-plotly-plot .ytick text,
-            .js-plotly-plot .annotation-text {
+            .js-plotly-plot .ytick text {
                 fill: var(--shell-text) !important;
             }
 
@@ -636,7 +635,7 @@ def build_price_chart(
             bgcolor="#fff176",
             bordercolor="#b22222",
             borderpad=4,
-            font={"size": 12},
+            font={"size": 12, "color": "#000000"},
         )
 
     if purchase_price_usd is not None:
@@ -659,7 +658,7 @@ def build_price_chart(
             bgcolor="#fff176",
             bordercolor="#1f6f43",
             borderpad=4,
-            font={"size": 12},
+            font={"size": 12, "color": "#000000"},
         )
 
     if reasonable_lower is not None and reasonable_upper is not None:
@@ -685,7 +684,7 @@ def build_price_chart(
             bgcolor="#fff176",
             bordercolor="#0d6efd",
             borderpad=4,
-            font={"size": 12},
+            font={"size": 12, "color": "#000000"},
         )
 
     figure.update_yaxes(title_text=f"Price ({currency_mode})", row=1, col=1)
@@ -1712,7 +1711,7 @@ def main() -> None:
                 )
                 fig_fx.update_yaxes(range=[y_min - lower_pad, y_max + upper_pad], tickformat=".4f", gridcolor="rgba(120,120,120,0.20)")
                 fig_fx.add_trace(go.Scatter(x=[last_x], y=[last_y], mode="markers", marker=dict(color="#ffab00", size=8), showlegend=False))
-                fig_fx.add_annotation(x=last_x, y=last_y, text=f"{last_y:.4f}", showarrow=False, bgcolor="#fff176", bordercolor="#000", borderpad=4, font={"size": 10}, xanchor="left", yanchor="bottom")
+                fig_fx.add_annotation(x=last_x, y=last_y, text=f"{last_y:.4f}", showarrow=False, bgcolor="#fff176", bordercolor="#000", borderpad=4, font={"size": 10, "color": "#000000"}, xanchor="left", yanchor="bottom")
                 st.plotly_chart(fig_fx, use_container_width=True)
                 st.markdown("[Source: Yahoo Finance — CAD=X](https://finance.yahoo.com/quote/CAD%3DX)")
             except Exception:
