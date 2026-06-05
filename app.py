@@ -1888,7 +1888,7 @@ def render_auth_gate() -> bool:
         else:
             st.error(text)
 
-    tab_sign_in, tab_sign_up, tab_forgot = st.tabs(["Sign In", "Create Account", "Forgot Password"])
+    tab_sign_in, tab_sign_up = st.tabs(["Sign In", "Create Account"])
 
     with tab_sign_in:
         with st.form("supabase_sign_in_form"):
@@ -1904,24 +1904,10 @@ def render_auth_gate() -> bool:
             else:
                 st.error(message)
 
-    with tab_sign_up:
-        with st.form("supabase_sign_up_form"):
-            signup_email = st.text_input("Email", key="supabase_signup_email")
-            signup_password = st.text_input("Password", type="password", key="supabase_signup_password")
-            sign_up_submitted = st.form_submit_button("Create Account", use_container_width=True)
-
-        if sign_up_submitted:
-            ok, message = _sign_up_supabase(signup_email.strip(), signup_password)
-            if ok:
-                st.success(message)
-                if _supabase_user_id():
-                    st.rerun()
-            else:
-                st.error(message)
-
-    with tab_forgot:
+        st.markdown("---")
+        st.caption("Forgot your password?")
         with st.form("supabase_forgot_password_form"):
-            forgot_email = st.text_input("Email", key="supabase_forgot_email")
+            forgot_email = st.text_input("Email for reset link", key="supabase_forgot_email")
             forgot_submitted = st.form_submit_button("Send reset link", use_container_width=True)
 
         if forgot_submitted:
@@ -1946,6 +1932,21 @@ def render_auth_gate() -> bool:
                     st.success(message)
                 else:
                     st.error(message)
+
+    with tab_sign_up:
+        with st.form("supabase_sign_up_form"):
+            signup_email = st.text_input("Email", key="supabase_signup_email")
+            signup_password = st.text_input("Password", type="password", key="supabase_signup_password")
+            sign_up_submitted = st.form_submit_button("Create Account", use_container_width=True)
+
+        if sign_up_submitted:
+            ok, message = _sign_up_supabase(signup_email.strip(), signup_password)
+            if ok:
+                st.success(message)
+                if _supabase_user_id():
+                    st.rerun()
+            else:
+                st.error(message)
 
     return False
 
