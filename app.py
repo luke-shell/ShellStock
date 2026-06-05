@@ -698,7 +698,7 @@ def is_rate_limited_error(error: Any) -> bool:
     )
 
 
-def get_transaction_fee(broker: str) -> float:
+def get_transaction_fee(broker: str, stock_currency: str = "USD") -> dict[str, Any]:
     """Get transaction fee percentage for each broker.
 
     Returns structured fee data so callers can support percent or flat fees.
@@ -707,12 +707,21 @@ def get_transaction_fee(broker: str) -> float:
     if broker == "WealthSimple":
         return {"type": "percent", "value": 0.015}
     elif broker == "RBC":
-        # RBC charges a flat CAD fee of $9.95
-        return {"type": "flat", "value": 9.95, "currency": "CAD"}
+        # RBC charges a flat $9.95 in the trading currency (CAD for Canadian stocks, USD for U.S. stocks).
+        normalized_currency = str(stock_currency or "USD").upper()
+        fee_currency = "CAD" if normalized_currency == "CAD" else "USD"
+        return {"type": "flat", "value": 9.95, "currency": fee_currency}
     return {"type": "percent", "value": 0.0}
 
 
-def calculate_estimated_sale_price(current_price: float | None, quantity: float | None, broker: str, fx_rate: float = 1.0, display_currency: str = "USD") -> dict[str, Any]:
+def calculate_estimated_sale_price(
+    current_price: float | None,
+    quantity: float | None,
+    broker: str,
+    fx_rate: float = 1.0,
+    display_currency: str = "USD",
+    stock_currency: str = "USD",
+) -> dict[str, Any]:
     """Calculate estimated sale price considering transaction fees."""
     if current_price is None or quantity is None:
         return {
@@ -725,7 +734,7 @@ def calculate_estimated_sale_price(current_price: float | None, quantity: float 
             "fee_percent": None,
         }
 
-    fee_info = get_transaction_fee(broker)
+    fee_info = get_transaction_fee(broker, stock_currency=stock_currency)
     current_total = current_price * quantity
 
     fee_amount_usd = 0.0
@@ -764,6 +773,19 @@ def pick_value(source: dict[str, Any], *keys: str) -> Any:
         if value not in (None, "", "N/A"):
             return value
     return None
+
+
+def detect_stock_currency_from_yahoo_info(info: dict[str, Any]) -> str:
+    """Infer stock trading currency from Yahoo metadata, independent of UI display currency."""
+    primary_currency = str(pick_value(info, "currency", "financialCurrency") or "").strip().upper()
+    if primary_currency in ("USD", "CAD"):
+        return primary_currency
+
+    exchange_hint = str(pick_value(info, "fullExchangeName", "exchange", "market") or "").lower()
+    if "toronto" in exchange_hint or "tsx" in exchange_hint or "canada" in exchange_hint:
+        return "CAD"
+
+    return "USD"
 
 
 def format_currency(value: Any, currency: str = "USD") -> str:
@@ -1420,8 +1442,17 @@ def render_metric_cards(info: dict[str, Any], history: pd.DataFrame, holding: di
             total_return_pct = ((current_price - purchase_price_usd) / purchase_price_usd * 100) if purchase_price_usd != 0 else 0
             total_delta = total_return_value
 
-    # Calculate estimated sale price (pass fx_rate for flat-fee conversions)
-    sale_data = calculate_estimated_sale_price(current_price, quantity, broker, fx_rate=fx_rate, display_currency=currency_mode)
+    stock_currency = detect_stock_currency_from_yahoo_info(info)
+
+    # Calculate estimated sale price (pass stock currency to pick correct flat-fee currency)
+    sale_data = calculate_estimated_sale_price(
+        current_price,
+        quantity,
+        broker,
+        fx_rate=fx_rate,
+        display_currency=currency_mode,
+        stock_currency=stock_currency,
+    )
     
     # CSS to make metric labels shorter to prevent wrapping
     st.markdown(
