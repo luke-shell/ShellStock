@@ -630,21 +630,17 @@ def initialize_state() -> None:
     if "holdings" not in st.session_state:
         persisted_holdings = get_persistent_data_key("holdings", {})
         if not persisted_holdings:
-            persisted_holdings = {
-                "AAPL": {
-                    "must_sell": None,
-                    "bought_point": None,
-                    "reasonable_lower": None,
-                    "reasonable_upper": None,
-                    "broker": "RBC",
-                    "quantity": None,
-                    "purchase_price_usd": None,
-                    "purchase_price_cad": None,
-                }
-            }
+            persisted_holdings = {}
         else:
             # Migrate any legacy `purchase_price` fields into `purchase_price_usd` for compatibility
             for sym, h in list(persisted_holdings.items()):
+                normalized_symbol = sanitize_symbol(str(sym))
+                if not normalized_symbol:
+                    persisted_holdings.pop(sym, None)
+                    continue
+                if normalized_symbol != sym:
+                    persisted_holdings[normalized_symbol] = persisted_holdings.pop(sym)
+                    h = persisted_holdings[normalized_symbol]
                 if isinstance(h, dict):
                     if "purchase_price" in h and "purchase_price_usd" not in h:
                         h["purchase_price_usd"] = h.get("purchase_price")
@@ -655,7 +651,8 @@ def initialize_state() -> None:
         st.session_state.holdings = persisted_holdings
     
     if "selected_holding" not in st.session_state:
-        st.session_state.selected_holding = get_persistent_data_key("selected_holding", "AAPL")
+        persisted_selected_holding = sanitize_symbol(get_persistent_data_key("selected_holding", ""))
+        st.session_state.selected_holding = persisted_selected_holding
     
     if "alerts" not in st.session_state:
         st.session_state.alerts = get_persistent_data_key("alerts", [])
@@ -932,6 +929,9 @@ def parse_optional_price(value: str) -> float | None:
 
 
 def get_holding(symbol: str) -> dict[str, float | None]:
+    symbol = sanitize_symbol(symbol)
+    if not symbol:
+        raise ValueError("Ticker symbol cannot be empty.")
     holdings: dict[str, dict[str, float | None]] = st.session_state.holdings
     if symbol not in holdings:
         holdings[symbol] = {
@@ -2057,7 +2057,11 @@ def render_holding_manager() -> str:
             st.rerun()
 
     # Holding details form
-    selected_holding = get_holding(st.session_state.selected_holding)
+    selected_symbol = sanitize_symbol(st.session_state.get("selected_holding", ""))
+    if not selected_symbol:
+        return st.session_state.selected_holding
+
+    selected_holding = get_holding(selected_symbol)
     currency_mode = st.session_state.get("currency_mode", "USD")
     
     # Get FX rate for currency conversion
@@ -2067,7 +2071,7 @@ def render_holding_manager() -> str:
         fx_rate = 1.0
     
     st.markdown("---")
-    st.markdown(f"### Edit: {st.session_state.selected_holding}")
+    st.markdown(f"### Edit: {selected_symbol}")
     
     with st.form("holding-details-form"):
         # Broker selection
@@ -2141,7 +2145,7 @@ def render_holding_manager() -> str:
     
     if save_holding_details:
         try:
-            updated = get_holding(st.session_state.selected_holding)
+            updated = get_holding(selected_symbol)
             updated["broker"] = broker
             updated["quantity"] = quantity_val if quantity_val > 0 else None
             # Store both USD and CAD purchase prices (allow user to specify both)
