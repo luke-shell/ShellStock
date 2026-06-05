@@ -437,6 +437,11 @@ def apply_custom_theme() -> None:
                 stroke: color-mix(in srgb, var(--shell-text) 18%, transparent) !important;
             }
 
+            /* Keep yellow annotation labels readable in all themes. */
+            .js-plotly-plot .annotation-text {
+                fill: #000000 !important;
+            }
+
             @media (max-width: 900px) {
                 .block-container {
                     padding-top: 0.7rem;
@@ -1863,14 +1868,26 @@ def render_alert_manager(default_symbol: str) -> list[str]:
             )
 
         st.dataframe(pd.DataFrame(alert_rows), use_container_width=True, hide_index=True)
-        
-        selected_index = st.number_input(
-            "Alert index to manage",
-            min_value=0,
-            max_value=max(0, len(st.session_state.alerts) - 1),
-            value=0,
-            step=1,
+
+        alert_options = list(range(len(st.session_state.alerts)))
+
+        def _format_alert_option(idx: int) -> str:
+            selected_alert = st.session_state.alerts[idx]
+            selected_currency = selected_alert.get("target_currency", "USD")
+            status = "Enabled" if selected_alert.get("enabled", True) else "Disabled"
+            sent_status = "Sent" if selected_alert.get("sent", False) else "Not sent"
+            return (
+                f"{selected_alert.get('symbol', '')}: {selected_alert.get('direction', 'above')} "
+                f"${float(selected_alert.get('target', 0)):.2f} {selected_currency} | {status} | {sent_status}"
+            )
+
+        selected_index = st.selectbox(
+            "Select alert to manage",
+            options=alert_options,
+            format_func=_format_alert_option,
+            key="selected_alert_index",
         )
+
         action_left, action_mid, action_right = st.columns(3)
         if action_left.button("Toggle enable", use_container_width=True):
             st.session_state.alerts[int(selected_index)]["enabled"] = not st.session_state.alerts[int(selected_index)].get(
@@ -1916,7 +1933,6 @@ def render_alert_manager(default_symbol: str) -> list[str]:
             for idx, item in enumerate(filtered_notifications):
                 display_rows.append(
                     {
-                        "#": idx,
                         "When": item.get("created_at", ""),
                         "Status": item.get("status", "active"),
                         "Title": item.get("title", ""),
@@ -1925,22 +1941,30 @@ def render_alert_manager(default_symbol: str) -> list[str]:
                 )
             st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
 
-            selected_note_index = st.number_input(
-                "Notification index to manage",
-                min_value=0,
-                max_value=max(0, len(filtered_notifications) - 1),
-                value=0,
-                step=1,
-                key="selected_notification_index",
+            notification_ids = [str(item.get("id", "")) for item in filtered_notifications]
+
+            def _format_notification_option(notification_id: str) -> str:
+                selected_note = next(
+                    (entry for entry in filtered_notifications if str(entry.get("id", "")) == str(notification_id)),
+                    {},
+                )
+                when_text = selected_note.get("created_at", "")
+                title_text = selected_note.get("title", "")
+                status_text = selected_note.get("status", "active")
+                return f"{when_text} | {status_text} | {title_text}"
+
+            selected_id = st.selectbox(
+                "Select notification to manage",
+                options=notification_ids,
+                format_func=_format_notification_option,
+                key="selected_notification_id",
             )
 
             action_col_1, action_col_2, action_col_3 = st.columns(3)
-            selected_item = filtered_notifications[int(selected_note_index)]
-            selected_id = selected_item.get("id")
 
             if action_col_1.button("Archive selected", use_container_width=True):
                 for item in history:
-                    if item.get("id") == selected_id:
+                    if str(item.get("id", "")) == str(selected_id):
                         item["status"] = "archived"
                         break
                 st.session_state.notification_history = history
@@ -1949,7 +1973,7 @@ def render_alert_manager(default_symbol: str) -> list[str]:
 
             if action_col_2.button("Unarchive selected", use_container_width=True):
                 for item in history:
-                    if item.get("id") == selected_id:
+                    if str(item.get("id", "")) == str(selected_id):
                         item["status"] = "active"
                         break
                 st.session_state.notification_history = history
@@ -1957,7 +1981,7 @@ def render_alert_manager(default_symbol: str) -> list[str]:
                 st.rerun()
 
             if action_col_3.button("Delete selected", use_container_width=True):
-                history = [item for item in history if item.get("id") != selected_id]
+                history = [item for item in history if str(item.get("id", "")) != str(selected_id)]
                 st.session_state.notification_history = history
                 set_persistent_data_key("notification_history", history)
                 st.rerun()
