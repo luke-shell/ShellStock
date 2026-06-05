@@ -51,17 +51,19 @@ INTERVAL_OPTIONS = {
 SYMBOL_FETCH_COOLDOWN_SECONDS = 45
 QUOTE_FETCH_COOLDOWN_SECONDS = 20
 PROVIDER_COOLDOWN_SECONDS = 90
+AUTO_REFRESH_INTERVAL_SECONDS = 60
+AUTO_REFRESH_DURATION_SECONDS = 600
 
 RANGE_FETCH_TTL_SECONDS = {
-    "1 Day": 30,
-    "1 Week": 60,
-    "1 Month": 180,
-    "3 Months": 300,
-    "6 Months": 420,
-    "YTD": 420,
-    "1 Year": 600,
-    "5 Years": 900,
-    "10 Years": 1200,
+    "1 Day": 300,
+    "1 Week": 600,
+    "1 Month": 900,
+    "3 Months": 1200,
+    "6 Months": 1800,
+    "YTD": 1800,
+    "1 Year": 2400,
+    "5 Years": 3600,
+    "10 Years": 5400,
 }
 
 
@@ -613,6 +615,12 @@ def initialize_state() -> None:
             persisted_notification_history = []
         st.session_state.notification_history = persisted_notification_history
 
+    if "auto_refresh_enabled" not in st.session_state:
+        st.session_state.auto_refresh_enabled = False
+
+    if "auto_refresh_until" not in st.session_state:
+        st.session_state.auto_refresh_until = None
+
 
 def safe_number(value: Any) -> float | None:
     if value is None:
@@ -636,14 +644,14 @@ def get_current_time_display() -> str:
     return f"{eastern_str} | {pacific_str}"
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def get_usd_cad_rate() -> float:
     """Get real-time USD to CAD exchange rate."""
     info = get_usd_cad_rate_info()
     return info.get("rate", 1.35)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def get_usd_cad_rate_info() -> dict:
     """Return USD->CAD rate and timestamp from Yahoo Finance."""
     try:
@@ -682,7 +690,12 @@ def get_usd_cad_rate_info() -> dict:
 
 def is_rate_limited_error(error: Any) -> bool:
     text = str(error).lower()
-    return "too many requests" in text or "rate limit" in text or "429" in text
+    return (
+        "too many requests" in text
+        or "rate limit" in text
+        or "429" in text
+        or "cooldown active" in text
+    )
 
 
 def get_transaction_fee(broker: str) -> float:
@@ -853,8 +866,59 @@ def load_stock_bundle(
         raise ValueError("No historical price data was returned for this ticker and time range.")
 
     info = ticker.info or {}
+    # Defer news fetches until the News tab is opened to reduce provider calls.
+    return history.reset_index(), info, []
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def load_stock_news(
+    symbol: str,
+    allow_insecure_ssl: bool,
+    force_reload: float | None = None,
+) -> list[dict[str, Any]]:
+    session = None
+    if allow_insecure_ssl:
+        session = create_insecure_session()
+
+    ticker = yf.Ticker(symbol, session=session)
     news_items = ticker.news or []
-    return history.reset_index(), info, news_items[:8]
+    return news_items[:8]
+
+
+def load_stock_news_resilient(
+    symbol: str,
+    allow_insecure_ssl: bool,
+    force_reload: float | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    if "last_good_stock_news" not in st.session_state:
+        st.session_state.last_good_stock_news = {}
+
+    symbol_key = symbol.upper()
+    provider_cooldown_remaining = get_provider_cooldown_remaining_seconds()
+    if provider_cooldown_remaining > 0 and force_reload is None:
+        cached_news = st.session_state.last_good_stock_news.get(symbol_key)
+        if isinstance(cached_news, list):
+            message = (
+                f"Data provider cooldown active ({provider_cooldown_remaining}s remaining). "
+                f"Showing cached news for {symbol_key}."
+            )
+            return cached_news, message
+        raise ValueError(
+            f"Data provider cooldown active for {provider_cooldown_remaining}s after rate limiting."
+        )
+
+    try:
+        news_items = load_stock_news(symbol, allow_insecure_ssl, force_reload=force_reload)
+        st.session_state.last_good_stock_news[symbol_key] = news_items
+        return news_items, None
+    except Exception as error:
+        if is_rate_limited_error(error):
+            activate_provider_cooldown()
+
+        cached_news = st.session_state.last_good_stock_news.get(symbol_key)
+        if isinstance(cached_news, list):
+            return cached_news, f"Rate limited by data provider. Showing cached news for {symbol_key}."
+        raise
 
 
 def load_stock_bundle_resilient(
@@ -1086,6 +1150,71 @@ def load_stock_quote_resilient(
     if last_error is not None:
         raise last_error
     raise ValueError("Unable to load quote data.")
+
+
+def get_live_quote_for_range(
+    symbol: str,
+    range_label: str,
+    allow_insecure_ssl: bool,
+    force_reload: float | None = None,
+) -> tuple[float | None, str | None]:
+    # 1 Day already uses intraday candles; additional quote merge is unnecessary.
+    if range_label == "1 Day":
+        return None, None
+
+    try:
+        quote, note = load_stock_quote_resilient(
+            symbol,
+            allow_insecure_ssl,
+            force_reload=force_reload,
+        )
+        return safe_number(quote.get("price")), note
+    except Exception:
+        return None, None
+
+
+def merge_live_quote_into_history(history: pd.DataFrame, live_price: float | None) -> pd.DataFrame:
+    if history is None or history.empty or live_price is None:
+        return history
+
+    merged = history.copy()
+    time_col = merged.columns[0]
+    last_row = merged.iloc[-1].copy()
+
+    now_ts = datetime.now()
+    try:
+        last_ts = pd.to_datetime(last_row[time_col], errors="coerce")
+    except Exception:
+        last_ts = pd.NaT
+
+    should_append = True
+    if pd.notna(last_ts):
+        try:
+            should_append = now_ts.date() > last_ts.date()
+        except Exception:
+            should_append = True
+
+    if should_append:
+        new_row = last_row.copy()
+        new_row[time_col] = now_ts
+        for col in ("Open", "High", "Low", "Close"):
+            if col in merged.columns:
+                new_row[col] = live_price
+        if "Volume" in merged.columns:
+            new_row["Volume"] = 0
+        return pd.concat([merged, pd.DataFrame([new_row])], ignore_index=True)
+
+    # Same-day bar exists: keep OHLC coherent while updating to latest live price.
+    if "Close" in merged.columns:
+        merged.at[merged.index[-1], "Close"] = live_price
+    if "High" in merged.columns:
+        current_high = safe_number(merged.iloc[-1]["High"])
+        merged.at[merged.index[-1], "High"] = max(current_high if current_high is not None else live_price, live_price)
+    if "Low" in merged.columns:
+        current_low = safe_number(merged.iloc[-1]["Low"])
+        merged.at[merged.index[-1], "Low"] = min(current_low if current_low is not None else live_price, live_price)
+
+    return merged
 
 
 def build_price_chart(
@@ -2369,7 +2498,9 @@ def main() -> None:
                 if st.button("Refresh Now", use_container_width=True):
                     st.session_state["last_refresh"] = time.time()
                     if st.session_state.get("auto_refresh_enabled"):
-                        st.session_state["auto_refresh_until"] = time.time() + float(st.session_state.get("auto_refresh_duration", 60))
+                        st.session_state["auto_refresh_until"] = time.time() + float(
+                            st.session_state.get("auto_refresh_duration", AUTO_REFRESH_DURATION_SECONDS)
+                        )
                     st.rerun()
             with rcol2:
                 auto_enabled = st.checkbox("Auto", value=st.session_state.get("auto_refresh_enabled", False), help="Enable auto-refresh after pressing Refresh Now")
@@ -2377,7 +2508,7 @@ def main() -> None:
 
             # Auto-refresh duration stored in session; no direct user entry here
             if "auto_refresh_duration" not in st.session_state:
-                st.session_state["auto_refresh_duration"] = 60
+                st.session_state["auto_refresh_duration"] = AUTO_REFRESH_DURATION_SECONDS
 
             # Display currency selector (compact)
             st.selectbox(
@@ -2452,7 +2583,7 @@ def main() -> None:
             st.markdown("---")
             auto_until = st.session_state.get("auto_refresh_until")
             if auto_until and time.time() < auto_until:
-                refresh_interval = 5
+                refresh_interval = AUTO_REFRESH_INTERVAL_SECONDS
                 st.markdown(f"<meta http-equiv='refresh' content='{refresh_interval}'>", unsafe_allow_html=True)
                 end_time_str = datetime.fromtimestamp(auto_until).strftime("%Y-%m-%d %H:%M:%S")
                 st.caption(f"Auto-refreshing every {refresh_interval}s until {end_time_str}")
@@ -2485,13 +2616,20 @@ def main() -> None:
     # If watchlist selected, render preview on the right; otherwise render holding
     if is_watchlist_selected:
         try:
-            history, info, news_items, bundle_note = load_stock_bundle_resilient(
+            history, info, _, bundle_note = load_stock_bundle_resilient(
                 symbol,
                 range_label,
                 allow_insecure_ssl,
                 force_reload=st.session_state.get("last_refresh"),
             )
-            current_price = safe_number(history.iloc[-1]["Close"])
+            live_quote_price, live_quote_note = get_live_quote_for_range(
+                symbol,
+                range_label,
+                allow_insecure_ssl,
+                force_reload=st.session_state.get("last_refresh"),
+            )
+            history = merge_live_quote_into_history(history, live_quote_price)
+            current_price = live_quote_price if live_quote_price is not None else safe_number(history.iloc[-1]["Close"])
             company_name = pick_value(info, "longName", "shortName") or symbol
             sector = pick_value(info, "sector") or "N/A"
             industry = pick_value(info, "industry") or "N/A"
@@ -2511,6 +2649,8 @@ def main() -> None:
                 st.caption(f"Displayed in {currency_mode}")
             if bundle_note:
                 st.warning(bundle_note)
+            if live_quote_note:
+                st.caption(live_quote_note)
 
             # Show chart
             preview_holding = {"broker": "RBC", "quantity": None, "purchase_price_usd": None, "purchase_price_cad": None, "must_sell": None, "reasonable_lower": None, "reasonable_upper": None}
@@ -2544,14 +2684,62 @@ def main() -> None:
                         st.info("No alerts were triggered during this scan.")
 
             with news_tab:
-                render_news(news_items)
+                try:
+                    news_items, news_note = load_stock_news_resilient(
+                        symbol,
+                        allow_insecure_ssl,
+                        force_reload=st.session_state.get("last_refresh"),
+                    )
+                    if news_note:
+                        st.caption(news_note)
+                    render_news(news_items)
+                except Exception as error:
+                    if is_rate_limited_error(error):
+                        st.warning("News is temporarily rate-limited. Try again shortly.")
+                    else:
+                        st.warning(f"Unable to load news: {error}")
 
         except Exception as error:
-            st.error(f"Unable to fetch data for {symbol}: {error}")
+            if is_rate_limited_error(error):
+                st.warning(
+                    f"Data provider is temporarily rate-limiting requests for {symbol}. "
+                    "Showing quote-only fallback when available."
+                )
+                try:
+                    fallback_quote, fallback_note = load_stock_quote_resilient(
+                        symbol,
+                        allow_insecure_ssl,
+                        force_reload=st.session_state.get("last_refresh"),
+                    )
+                    fallback_price = safe_number(fallback_quote.get("price"))
+                    fallback_ts = fallback_quote.get("timestamp", "N/A")
+                    if fallback_price is not None:
+                        currency_mode = st.session_state.get("currency_mode", "USD")
+                        if currency_mode == "CAD":
+                            fx_rate = get_usd_cad_rate()
+                            display_price = fallback_price * fx_rate
+                        else:
+                            display_price = fallback_price
+                        st.metric("Latest Quote", f"${display_price:.2f} {currency_mode}")
+                        st.caption(f"Quote timestamp: {fallback_ts}")
+                    if fallback_note:
+                        st.caption(fallback_note)
+                except Exception:
+                    cooldown_remaining = get_provider_cooldown_remaining_seconds()
+                    if cooldown_remaining > 0:
+                        st.info(
+                            f"Provider cooldown in effect for about {cooldown_remaining}s. "
+                            "Try Refresh Now after cooldown expires."
+                        )
+                    else:
+                        st.info("Quote fallback is temporarily unavailable. Try again in a moment.")
+                st.link_button("Open in Yahoo Finance", f"https://finance.yahoo.com/quote/{symbol}")
+            else:
+                st.error(f"Unable to fetch data for {symbol}: {error}")
         return
 
     try:
-        history, info, news_items, bundle_note = load_stock_bundle_resilient(
+        history, info, _, bundle_note = load_stock_bundle_resilient(
             symbol,
             range_label,
             allow_insecure_ssl,
@@ -2590,7 +2778,16 @@ def main() -> None:
         st.caption(f"Displayed in {display_currency}")
 
     selected_holding = get_holding(symbol)
-    current_price = safe_number(history.iloc[-1]["Close"])
+    live_quote_price, live_quote_note = get_live_quote_for_range(
+        symbol,
+        range_label,
+        allow_insecure_ssl,
+        force_reload=st.session_state.get("last_refresh"),
+    )
+    history = merge_live_quote_into_history(history, live_quote_price)
+    current_price = live_quote_price if live_quote_price is not None else safe_number(history.iloc[-1]["Close"])
+    if live_quote_note:
+        st.caption(live_quote_note)
     
     # Time range selector placed to the right of the chart
     range_keys = list(INTERVAL_OPTIONS.keys())
@@ -2644,7 +2841,20 @@ def main() -> None:
                 st.info("No alerts were triggered during this scan.")
 
     with news_tab:
-        render_news(news_items)
+        try:
+            news_items, news_note = load_stock_news_resilient(
+                symbol,
+                allow_insecure_ssl,
+                force_reload=st.session_state.get("last_refresh"),
+            )
+            if news_note:
+                st.caption(news_note)
+            render_news(news_items)
+        except Exception as error:
+            if is_rate_limited_error(error):
+                st.warning("News is temporarily rate-limited. Try again shortly.")
+            else:
+                st.warning(f"Unable to load news: {error}")
 
     last_timestamp = history.iloc[-1][history.columns[0]]
     if isinstance(last_timestamp, datetime):
