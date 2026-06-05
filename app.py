@@ -620,16 +620,31 @@ def get_usd_cad_rate_info() -> dict:
                 ts_str = last_idx.strftime("%Y-%m-%d %H:%M %Z") if hasattr(last_idx, "tz") and last_idx.tz is not None else last_idx.strftime("%Y-%m-%d %H:%M")
             except Exception:
                 ts_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-            return {"rate": last_close, "timestamp": ts_str}
+            result = {"rate": last_close, "timestamp": ts_str}
+            set_persistent_data_key("last_fx_info", result)
+            return result
 
         # Fallback to ticker.info
         info = ticker.info or {}
         current_rate = info.get("currentPrice") or info.get("regularMarketPrice")
         if current_rate:
-            return {"rate": float(current_rate), "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")}
+            result = {"rate": float(current_rate), "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")}
+            set_persistent_data_key("last_fx_info", result)
+            return result
     except Exception:
         pass
+
+    # Fallback to last successful FX quote if Yahoo is rate-limited/unavailable.
+    cached_fx = get_persistent_data_key("last_fx_info", None)
+    if isinstance(cached_fx, dict) and "rate" in cached_fx:
+        return cached_fx
+
     return {"rate": 1.35, "timestamp": "N/A"}
+
+
+def is_rate_limited_error(error: Any) -> bool:
+    text = str(error).lower()
+    return "too many requests" in text or "rate limit" in text or "429" in text
 
 
 def get_transaction_fee(broker: str) -> float:
@@ -802,6 +817,72 @@ def load_stock_bundle(
     info = ticker.info or {}
     news_items = ticker.news or []
     return history.reset_index(), info, news_items[:8]
+
+
+def load_stock_bundle_resilient(
+    symbol: str,
+    range_label: str,
+    allow_insecure_ssl: bool,
+    force_reload: float | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any], list[dict[str, Any]], str | None]:
+    """Load bundle with retries and stale fallback when provider rate-limits requests."""
+    if "request_cycle_bundle_cache" not in st.session_state:
+        st.session_state.request_cycle_bundle_cache = {}
+
+    refresh_marker = None
+    if force_reload is not None:
+        try:
+            refresh_marker = round(float(force_reload), 3)
+        except Exception:
+            refresh_marker = str(force_reload)
+
+    request_cache_key = f"{symbol.upper()}::{range_label}::{int(bool(allow_insecure_ssl))}::{refresh_marker}"
+    request_cycle_cache: dict[str, Any] = st.session_state.request_cycle_bundle_cache
+    cached_for_run = request_cycle_cache.get(request_cache_key)
+    if isinstance(cached_for_run, tuple) and len(cached_for_run) == 4:
+        run_history, run_info, run_news, run_note = cached_for_run
+        if isinstance(run_history, pd.DataFrame):
+            return run_history.copy(), run_info, run_news, run_note
+
+    cache_key = f"{symbol.upper()}::{range_label}"
+    if "last_good_stock_bundles" not in st.session_state:
+        st.session_state.last_good_stock_bundles = {}
+
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            bundle = load_stock_bundle(symbol, range_label, allow_insecure_ssl, force_reload=force_reload)
+            st.session_state.last_good_stock_bundles[cache_key] = {
+                "history": bundle[0].to_dict(orient="list"),
+                "info": bundle[1],
+                "news": bundle[2],
+                "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            result = (bundle[0], bundle[1], bundle[2], None)
+            request_cycle_cache[request_cache_key] = result
+            return result
+        except Exception as error:
+            last_error = error
+            if is_rate_limited_error(error) and attempt < 2:
+                time.sleep(1.2 + attempt)
+                continue
+            break
+
+    cached = st.session_state.last_good_stock_bundles.get(cache_key)
+    if cached and isinstance(cached, dict):
+        cached_history = pd.DataFrame(cached.get("history", {}))
+        if not cached_history.empty:
+            message = (
+                f"Rate limited by data provider. Showing cached {symbol.upper()} data "
+                f"from {cached.get('saved_at', 'an earlier time')}."
+            )
+            result = (cached_history, cached.get("info", {}), cached.get("news", []), message)
+            request_cycle_cache[request_cache_key] = result
+            return result
+
+    if last_error is not None:
+        raise last_error
+    raise ValueError("Unable to load stock data.")
 
 
 def build_price_chart(
@@ -1235,7 +1316,12 @@ def render_watchlist_display() -> None:
             current_price_str = "—"
             try:
                 allow_insecure_ssl = st.session_state.get("allow_insecure_ssl", False)
-                watch_history, _, _ = load_stock_bundle(sym, "1 Day", allow_insecure_ssl, force_reload=st.session_state.get("last_refresh"))
+                watch_history, _, _, _ = load_stock_bundle_resilient(
+                    sym,
+                    "1 Day",
+                    allow_insecure_ssl,
+                    force_reload=st.session_state.get("last_refresh"),
+                )
                 current_price = safe_number(watch_history.iloc[-1]["Close"])
                 if current_price:
                     if currency_mode == "CAD":
@@ -1650,6 +1736,16 @@ def evaluate_alerts(
     if not alerts:
         return notifications
 
+    now_ts = time.time()
+    last_scan_at = float(st.session_state.get("last_alert_scan_at", 0.0) or 0.0)
+    cooldown_seconds = 60
+    elapsed = now_ts - last_scan_at
+    if elapsed < cooldown_seconds:
+        remaining = max(1, int(cooldown_seconds - elapsed))
+        return [f"Alert scan throttled to protect data provider limits. Try again in {remaining}s."]
+
+    st.session_state.last_alert_scan_at = now_ts
+
     for index, alert in enumerate(alerts):
         if not alert.get("enabled", True) or alert.get("sent", False):
             continue
@@ -1659,7 +1755,12 @@ def evaluate_alerts(
             continue
 
         try:
-            history, _, _ = load_stock_bundle(symbol, "1 Day", allow_insecure_ssl, force_reload=st.session_state.get("last_refresh"))
+            history, _, _, _ = load_stock_bundle_resilient(
+                symbol,
+                "1 Day",
+                allow_insecure_ssl,
+                force_reload=st.session_state.get("last_refresh"),
+            )
         except Exception as error:
             notifications.append(f"{symbol}: failed to evaluate alert ({error})")
             continue
@@ -1862,6 +1963,14 @@ def render_alert_manager(default_symbol: str) -> list[str]:
                 st.rerun()
 
     pending_notifications: list[str] = []
+    last_scan_at = float(st.session_state.get("last_alert_scan_at", 0.0) or 0.0)
+    if last_scan_at > 0:
+        elapsed = time.time() - last_scan_at
+        if elapsed < 60:
+            st.caption(f"Next alert scan available in {max(1, int(60 - elapsed))}s.")
+        else:
+            st.caption(f"Last alert scan: {datetime.fromtimestamp(last_scan_at).strftime('%Y-%m-%d %H:%M:%S')}")
+
     if st.button("Run alert scan now", type="primary"):
         pending_notifications = ["SCAN_REQUESTED"]
     
@@ -1975,6 +2084,9 @@ def main() -> None:
 
     initialize_state()
 
+    # Clear per-rerun request cache so repeated fetches in one run are shared.
+    st.session_state.request_cycle_bundle_cache = {}
+
     st.title("ShellStock")
     
     # Display current time in Eastern and PST
@@ -2047,7 +2159,12 @@ def main() -> None:
             # Add vertical spacing between the slider and the FX mini-chart for readability
             st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
             try:
-                fx_history, fx_info, _ = load_stock_bundle("CAD=X", fx_range_label, allow_insecure_ssl, force_reload=st.session_state.get("last_refresh"))
+                fx_history, fx_info, _, fx_note = load_stock_bundle_resilient(
+                    "CAD=X",
+                    fx_range_label,
+                    allow_insecure_ssl,
+                    force_reload=st.session_state.get("last_refresh"),
+                )
                 fx_series = fx_history.set_index(fx_history.columns[0])["Close"]
 
                 fig_fx = go.Figure()
@@ -2072,8 +2189,10 @@ def main() -> None:
                 fig_fx.add_annotation(x=last_x, y=last_y, text=f"{last_y:.4f}", showarrow=False, bgcolor="#fff176", bordercolor="#000", borderpad=4, font={"size": 10, "color": "#000000"}, xanchor="left", yanchor="bottom")
                 st.plotly_chart(fig_fx, use_container_width=True)
                 st.markdown("[Source: Yahoo Finance — CAD=X](https://finance.yahoo.com/quote/CAD%3DX)")
+                if fx_note:
+                    st.caption(fx_note)
             except Exception:
-                st.caption("FX mini-chart unavailable")
+                st.caption("FX data temporarily unavailable (provider may be rate-limiting).")
 
             # If auto-refresh window is active, inject a meta refresh to reload periodically
             st.markdown("---")
@@ -2109,7 +2228,12 @@ def main() -> None:
     # If watchlist selected, render preview on the right; otherwise render holding
     if is_watchlist_selected:
         try:
-            history, info, news_items = load_stock_bundle(symbol, range_label, allow_insecure_ssl, force_reload=st.session_state.get("last_refresh"))
+            history, info, news_items, bundle_note = load_stock_bundle_resilient(
+                symbol,
+                range_label,
+                allow_insecure_ssl,
+                force_reload=st.session_state.get("last_refresh"),
+            )
             current_price = safe_number(history.iloc[-1]["Close"])
             company_name = pick_value(info, "longName", "shortName") or symbol
             sector = pick_value(info, "sector") or "N/A"
@@ -2128,6 +2252,8 @@ def main() -> None:
                     st.link_button("🌐 Company", website, use_container_width=True)
                 currency_mode = st.session_state.get("currency_mode", "USD")
                 st.caption(f"Displayed in {currency_mode}")
+            if bundle_note:
+                st.warning(bundle_note)
 
             # Show chart
             preview_holding = {"broker": "RBC", "quantity": None, "purchase_price_usd": None, "purchase_price_cad": None, "must_sell": None, "reasonable_lower": None, "reasonable_upper": None}
@@ -2168,12 +2294,25 @@ def main() -> None:
         return
 
     try:
-        history, info, news_items = load_stock_bundle(symbol, range_label, allow_insecure_ssl, force_reload=st.session_state.get("last_refresh"))
+        history, info, news_items, bundle_note = load_stock_bundle_resilient(
+            symbol,
+            range_label,
+            allow_insecure_ssl,
+            force_reload=st.session_state.get("last_refresh"),
+        )
     except Exception as error:
-        st.error(f"Unable to load data for {symbol}: {error}")
+        if is_rate_limited_error(error):
+            st.error(
+                f"Data provider rate limit reached for {symbol}. Please wait a minute and try Refresh Now."
+            )
+        else:
+            st.error(f"Unable to load data for {symbol}: {error}")
         if "CERTIFICATE_VERIFY_FAILED" in str(error) and not allow_insecure_ssl:
             st.info("Certificate verification failed; consider disabling SSL verification in a secure environment.")
         return
+
+    if bundle_note:
+        st.warning(bundle_note)
 
     company_name = pick_value(info, "longName", "shortName") or symbol
     sector = pick_value(info, "sector") or "N/A"
