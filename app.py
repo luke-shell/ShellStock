@@ -1940,7 +1940,7 @@ def render_holding_manager() -> str:
         })
     
     # Create clickable table
-    cols = st.columns([1, 1.5, 1.5, 2, 1.5])
+    cols = st.columns([1, 1.5, 1.5, 2, 1.5, 1])
     with cols[0]:
         st.write("**Ticker**")
     with cols[1]:
@@ -1951,9 +1951,11 @@ def render_holding_manager() -> str:
         st.write(f"**Book Cost ({currency_mode})**")
     with cols[4]:
         st.write("**Broker**")
+    with cols[5]:
+        st.write("**Action**")
     
     for holding_data in holdings_data:
-        cols = st.columns([1, 1.5, 1.5, 2, 1.5])
+        cols = st.columns([1, 1.5, 1.5, 2, 1.5, 1])
         with cols[0]:
             if st.button(
                 holding_data["symbol"],
@@ -1995,6 +1997,19 @@ def render_holding_manager() -> str:
             st.write(cost_str)
         with cols[4]:
             st.write(holding_data["broker"])
+        with cols[5]:
+            remove_symbol = holding_data["symbol"]
+            if st.button("Remove", key=f"remove_holding_{remove_symbol}", use_container_width=True):
+                if len(holdings) <= 1:
+                    st.warning("At least one holding must remain.")
+                else:
+                    holdings.pop(remove_symbol, None)
+                    if st.session_state.selected_holding == remove_symbol:
+                        st.session_state.selected_holding = sorted(holdings.keys())[0]
+                    set_persistent_data_key("holdings", st.session_state.holdings)
+                    set_persistent_data_key("selected_holding", st.session_state.selected_holding)
+                    st.warning(f"Removed {remove_symbol} from holdings.")
+                    st.rerun()
     
     st.divider()
 
