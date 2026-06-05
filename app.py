@@ -1917,97 +1917,7 @@ def render_alert_manager(default_symbol: str) -> list[str]:
     else:
         st.info("No alerts created yet.")
 
-    st.markdown("### Notification center")
-    history: list[dict[str, Any]] = st.session_state.get("notification_history", [])
-    if not history:
-        st.info("No notifications yet.")
-    else:
-        status_filter = st.radio(
-            "Show",
-            options=["Active", "Archived", "All"],
-            horizontal=True,
-            key="notification_filter",
-            label_visibility="collapsed",
-        )
-
-        if status_filter == "Active":
-            filtered_notifications = [item for item in history if item.get("status", "active") == "active"]
-        elif status_filter == "Archived":
-            filtered_notifications = [item for item in history if item.get("status") == "archived"]
-        else:
-            filtered_notifications = history
-
-        if not filtered_notifications:
-            st.caption("No notifications match this filter.")
-        else:
-            display_rows = []
-            for idx, item in enumerate(filtered_notifications):
-                display_rows.append(
-                    {
-                        "Select": False,
-                        "When": item.get("created_at", ""),
-                        "Status": item.get("status", "active"),
-                        "Title": item.get("title", ""),
-                        "Message": item.get("message", ""),
-                    }
-                )
-
-            notifications_df = pd.DataFrame(display_rows)
-            edited_notifications_df = st.data_editor(
-                notifications_df,
-                use_container_width=True,
-                hide_index=True,
-                key="notifications_table_editor",
-                column_config={
-                    "Select": st.column_config.CheckboxColumn("Select", help="Pick one notification"),
-                },
-                disabled=["When", "Status", "Title", "Message"],
-            )
-
-            selected_notification_positions = [
-                idx for idx, selected in enumerate(edited_notifications_df.get("Select", [])) if bool(selected)
-            ]
-            selected_notification_idx = selected_notification_positions[0] if selected_notification_positions else None
-            if len(selected_notification_positions) > 1:
-                st.caption("Multiple notifications selected. Actions will use the first selected row.")
-
-            action_col_1, action_col_2, action_col_3 = st.columns(3)
-
-            if action_col_1.button("Archive selected", use_container_width=True):
-                if selected_notification_idx is None:
-                    st.warning("Select a notification row first.")
-                else:
-                    selected_id = str(filtered_notifications[int(selected_notification_idx)].get("id", ""))
-                    for item in history:
-                        if str(item.get("id", "")) == selected_id:
-                            item["status"] = "archived"
-                            break
-                    st.session_state.notification_history = history
-                    set_persistent_data_key("notification_history", history)
-                    st.rerun()
-
-            if action_col_2.button("Unarchive selected", use_container_width=True):
-                if selected_notification_idx is None:
-                    st.warning("Select a notification row first.")
-                else:
-                    selected_id = str(filtered_notifications[int(selected_notification_idx)].get("id", ""))
-                    for item in history:
-                        if str(item.get("id", "")) == selected_id:
-                            item["status"] = "active"
-                            break
-                    st.session_state.notification_history = history
-                    set_persistent_data_key("notification_history", history)
-                    st.rerun()
-
-            if action_col_3.button("Delete selected", use_container_width=True):
-                if selected_notification_idx is None:
-                    st.warning("Select a notification row first.")
-                else:
-                    selected_id = str(filtered_notifications[int(selected_notification_idx)].get("id", ""))
-                    history = [item for item in history if str(item.get("id", "")) != selected_id]
-                    st.session_state.notification_history = history
-                    set_persistent_data_key("notification_history", history)
-                    st.rerun()
+    st.caption("Notification history is managed in the sidebar master hub (🔔 Notifications).")
 
     pending_notifications: list[str] = []
     last_scan_at = float(st.session_state.get("last_alert_scan_at", 0.0) or 0.0)
@@ -2022,6 +1932,103 @@ def render_alert_manager(default_symbol: str) -> list[str]:
         pending_notifications = ["SCAN_REQUESTED"]
     
     return pending_notifications
+
+
+def render_notification_hub() -> None:
+    st.markdown("### 🔔 Master Notification Hub")
+
+    history: list[dict[str, Any]] = st.session_state.get("notification_history", [])
+    if not history:
+        st.info("No notifications yet.")
+        return
+
+    status_filter = st.radio(
+        "Show",
+        options=["Active", "Archived", "All"],
+        horizontal=True,
+        key="notification_filter",
+        label_visibility="collapsed",
+    )
+
+    if status_filter == "Active":
+        filtered_notifications = [item for item in history if item.get("status", "active") == "active"]
+    elif status_filter == "Archived":
+        filtered_notifications = [item for item in history if item.get("status") == "archived"]
+    else:
+        filtered_notifications = history
+
+    if not filtered_notifications:
+        st.caption("No notifications match this filter.")
+        return
+
+    display_rows = []
+    for item in filtered_notifications:
+        display_rows.append(
+            {
+                "Select": False,
+                "When": item.get("created_at", ""),
+                "Status": item.get("status", "active"),
+                "Title": item.get("title", ""),
+                "Message": item.get("message", ""),
+            }
+        )
+
+    notifications_df = pd.DataFrame(display_rows)
+    edited_notifications_df = st.data_editor(
+        notifications_df,
+        use_container_width=True,
+        hide_index=True,
+        key="notifications_table_editor",
+        column_config={
+            "Select": st.column_config.CheckboxColumn("Select", help="Pick one notification"),
+        },
+        disabled=["When", "Status", "Title", "Message"],
+    )
+
+    selected_notification_positions = [
+        idx for idx, selected in enumerate(edited_notifications_df.get("Select", [])) if bool(selected)
+    ]
+    selected_notification_idx = selected_notification_positions[0] if selected_notification_positions else None
+    if len(selected_notification_positions) > 1:
+        st.caption("Multiple notifications selected. Actions will use the first selected row.")
+
+    action_col_1, action_col_2, action_col_3 = st.columns(3)
+
+    if action_col_1.button("Archive selected", use_container_width=True, key="hub_archive_selected"):
+        if selected_notification_idx is None:
+            st.warning("Select a notification row first.")
+        else:
+            selected_id = str(filtered_notifications[int(selected_notification_idx)].get("id", ""))
+            for item in history:
+                if str(item.get("id", "")) == selected_id:
+                    item["status"] = "archived"
+                    break
+            st.session_state.notification_history = history
+            set_persistent_data_key("notification_history", history)
+            st.rerun()
+
+    if action_col_2.button("Unarchive selected", use_container_width=True, key="hub_unarchive_selected"):
+        if selected_notification_idx is None:
+            st.warning("Select a notification row first.")
+        else:
+            selected_id = str(filtered_notifications[int(selected_notification_idx)].get("id", ""))
+            for item in history:
+                if str(item.get("id", "")) == selected_id:
+                    item["status"] = "active"
+                    break
+            st.session_state.notification_history = history
+            set_persistent_data_key("notification_history", history)
+            st.rerun()
+
+    if action_col_3.button("Delete selected", use_container_width=True, key="hub_delete_selected"):
+        if selected_notification_idx is None:
+            st.warning("Select a notification row first.")
+        else:
+            selected_id = str(filtered_notifications[int(selected_notification_idx)].get("id", ""))
+            history = [item for item in history if str(item.get("id", "")) != selected_id]
+            st.session_state.notification_history = history
+            set_persistent_data_key("notification_history", history)
+            st.rerun()
 
 
 def render_auth_gate() -> bool:
@@ -2149,7 +2156,12 @@ def main() -> None:
 
     with st.sidebar:
         # Create three tabs in the sidebar: Controls, My Holdings, Watchlist
-        tab_controls, tab_holdings, tab_watchlist = st.tabs(["⚙️ Controls", "📊 My Holdings", "🔭 Watchlist"])
+        tab_controls, tab_holdings, tab_watchlist, tab_notifications = st.tabs([
+            "⚙️ Controls",
+            "📊 My Holdings",
+            "🔭 Watchlist",
+            "🔔 Notifications",
+        ])
         
         with tab_controls:
             backend_label = "Supabase (per-user)" if _supabase_configured() else "Local JSON"
@@ -2257,6 +2269,9 @@ def main() -> None:
         with tab_watchlist:
             # Watchlist display
             render_watchlist_display()
+
+        with tab_notifications:
+            render_notification_hub()
 
     # Determine is_watchlist_selected based on session state
     is_watchlist_selected = bool(st.session_state.get("selected_watchlist_symbol"))
