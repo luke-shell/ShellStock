@@ -48,6 +48,36 @@ INTERVAL_OPTIONS = {
     "10 Years": {"period": "10y", "interval": "1mo"},
 }
 
+SYMBOL_FETCH_COOLDOWN_SECONDS = 45
+QUOTE_FETCH_COOLDOWN_SECONDS = 20
+PROVIDER_COOLDOWN_SECONDS = 90
+
+RANGE_FETCH_TTL_SECONDS = {
+    "1 Day": 30,
+    "1 Week": 60,
+    "1 Month": 180,
+    "3 Months": 300,
+    "6 Months": 420,
+    "YTD": 420,
+    "1 Year": 600,
+    "5 Years": 900,
+    "10 Years": 1200,
+}
+
+
+def get_range_fetch_ttl_seconds(range_label: str) -> int:
+    return int(RANGE_FETCH_TTL_SECONDS.get(range_label, SYMBOL_FETCH_COOLDOWN_SECONDS))
+
+
+def get_provider_cooldown_remaining_seconds() -> int:
+    until = float(st.session_state.get("provider_cooldown_until", 0.0) or 0.0)
+    remaining = int(until - time.time())
+    return max(0, remaining)
+
+
+def activate_provider_cooldown(seconds: int = PROVIDER_COOLDOWN_SECONDS) -> None:
+    st.session_state.provider_cooldown_until = time.time() + max(1, int(seconds))
+
 
 def _supabase_configured() -> bool:
     if create_client is None:
@@ -834,6 +864,41 @@ def load_stock_bundle_resilient(
     force_reload: float | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any], list[dict[str, Any]], str | None]:
     """Load bundle with retries and stale fallback when provider rate-limits requests."""
+    cache_key = f"{symbol.upper()}::{range_label}"
+    if "last_good_stock_bundles" not in st.session_state:
+        st.session_state.last_good_stock_bundles = {}
+
+    if "symbol_fetch_cache" not in st.session_state:
+        st.session_state.symbol_fetch_cache = {}
+
+    ttl_seconds = get_range_fetch_ttl_seconds(range_label)
+    provider_cooldown_remaining = get_provider_cooldown_remaining_seconds()
+    if provider_cooldown_remaining > 0 and force_reload is None:
+        cached = st.session_state.last_good_stock_bundles.get(cache_key)
+        if cached and isinstance(cached, dict):
+            cached_history = pd.DataFrame(cached.get("history", {}))
+            if not cached_history.empty:
+                message = (
+                    f"Data provider cooldown active ({provider_cooldown_remaining}s remaining). "
+                    f"Showing cached {symbol.upper()} data from {cached.get('saved_at', 'an earlier time')}."
+                )
+                return cached_history, cached.get("info", {}), cached.get("news", []), message
+        raise ValueError(
+            f"Data provider cooldown active for {provider_cooldown_remaining}s after rate limiting."
+        )
+
+    cooldown_key = f"{symbol.upper()}::{range_label}::{int(bool(allow_insecure_ssl))}"
+    now_ts = time.time()
+    cooldown_entry = st.session_state.symbol_fetch_cache.get(cooldown_key)
+    if force_reload is None and isinstance(cooldown_entry, dict):
+        fetched_at = float(cooldown_entry.get("fetched_at", 0.0) or 0.0)
+        if (now_ts - fetched_at) < ttl_seconds:
+            cooldown_bundle = cooldown_entry.get("bundle")
+            if isinstance(cooldown_bundle, tuple) and len(cooldown_bundle) == 4:
+                run_history, run_info, run_news, run_note = cooldown_bundle
+                if isinstance(run_history, pd.DataFrame):
+                    return run_history.copy(), run_info, run_news, run_note
+
     if "request_cycle_bundle_cache" not in st.session_state:
         st.session_state.request_cycle_bundle_cache = {}
 
@@ -852,10 +917,6 @@ def load_stock_bundle_resilient(
         if isinstance(run_history, pd.DataFrame):
             return run_history.copy(), run_info, run_news, run_note
 
-    cache_key = f"{symbol.upper()}::{range_label}"
-    if "last_good_stock_bundles" not in st.session_state:
-        st.session_state.last_good_stock_bundles = {}
-
     last_error: Exception | None = None
     for attempt in range(3):
         try:
@@ -868,10 +929,15 @@ def load_stock_bundle_resilient(
             }
             result = (bundle[0], bundle[1], bundle[2], None)
             request_cycle_cache[request_cache_key] = result
+            st.session_state.symbol_fetch_cache[cooldown_key] = {
+                "fetched_at": now_ts,
+                "bundle": result,
+            }
             return result
         except Exception as error:
             last_error = error
             if is_rate_limited_error(error) and attempt < 2:
+                activate_provider_cooldown()
                 time.sleep(1.2 + attempt)
                 continue
             break
@@ -886,11 +952,140 @@ def load_stock_bundle_resilient(
             )
             result = (cached_history, cached.get("info", {}), cached.get("news", []), message)
             request_cycle_cache[request_cache_key] = result
+            st.session_state.symbol_fetch_cache[cooldown_key] = {
+                "fetched_at": now_ts,
+                "bundle": result,
+            }
             return result
 
     if last_error is not None:
+        if is_rate_limited_error(last_error):
+            activate_provider_cooldown()
         raise last_error
     raise ValueError("Unable to load stock data.")
+
+
+def load_stock_quote(
+    symbol: str,
+    allow_insecure_ssl: bool,
+    force_reload: float | None = None,
+) -> dict[str, Any]:
+    session = None
+    if allow_insecure_ssl:
+        session = create_insecure_session()
+
+    ticker = yf.Ticker(symbol, session=session)
+
+    price = None
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        fast_info = ticker.fast_info or {}
+        fast_price = fast_info.get("lastPrice") or fast_info.get("regularMarketPrice")
+        if fast_price not in (None, ""):
+            price = float(fast_price)
+    except Exception:
+        pass
+
+    if price is None:
+        hist = ticker.history(period="1d", interval="1m", auto_adjust=False)
+        if hist is not None and not hist.empty:
+            price = float(hist.iloc[-1]["Close"])
+            last_idx = hist.index[-1]
+            try:
+                timestamp = (
+                    last_idx.strftime("%Y-%m-%d %H:%M %Z")
+                    if hasattr(last_idx, "tz") and last_idx.tz is not None
+                    else last_idx.strftime("%Y-%m-%d %H:%M")
+                )
+            except Exception:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if price is None:
+        info = ticker.info or {}
+        fallback_price = info.get("currentPrice") or info.get("regularMarketPrice")
+        if fallback_price not in (None, ""):
+            price = float(fallback_price)
+
+    if price is None:
+        raise ValueError("No quote data was returned for this ticker.")
+
+    return {
+        "symbol": symbol.upper(),
+        "price": price,
+        "timestamp": timestamp,
+    }
+
+
+def load_stock_quote_resilient(
+    symbol: str,
+    allow_insecure_ssl: bool,
+    force_reload: float | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    if "quote_fetch_cache" not in st.session_state:
+        st.session_state.quote_fetch_cache = {}
+    if "last_good_quotes" not in st.session_state:
+        st.session_state.last_good_quotes = {}
+
+    symbol_key = symbol.upper()
+    cooldown_key = f"{symbol_key}::{int(bool(allow_insecure_ssl))}"
+    now_ts = time.time()
+
+    provider_cooldown_remaining = get_provider_cooldown_remaining_seconds()
+    if provider_cooldown_remaining > 0 and force_reload is None:
+        cached_quote = st.session_state.last_good_quotes.get(symbol_key)
+        if isinstance(cached_quote, dict) and safe_number(cached_quote.get("price")) is not None:
+            message = (
+                f"Data provider cooldown active ({provider_cooldown_remaining}s remaining). "
+                f"Showing cached quote for {symbol_key}."
+            )
+            return cached_quote, message
+        raise ValueError(
+            f"Data provider cooldown active for {provider_cooldown_remaining}s after rate limiting."
+        )
+
+    cache_entry = st.session_state.quote_fetch_cache.get(cooldown_key)
+    if force_reload is None and isinstance(cache_entry, dict):
+        fetched_at = float(cache_entry.get("fetched_at", 0.0) or 0.0)
+        if (now_ts - fetched_at) < QUOTE_FETCH_COOLDOWN_SECONDS:
+            quote = cache_entry.get("quote")
+            note = cache_entry.get("note")
+            if isinstance(quote, dict) and safe_number(quote.get("price")) is not None:
+                return quote, note
+
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            quote = load_stock_quote(symbol, allow_insecure_ssl, force_reload=force_reload)
+            st.session_state.last_good_quotes[symbol_key] = quote
+            st.session_state.quote_fetch_cache[cooldown_key] = {
+                "fetched_at": now_ts,
+                "quote": quote,
+                "note": None,
+            }
+            return quote, None
+        except Exception as error:
+            last_error = error
+            if is_rate_limited_error(error):
+                activate_provider_cooldown()
+            if is_rate_limited_error(error) and attempt < 1:
+                time.sleep(1.2)
+                continue
+            break
+
+    cached_quote = st.session_state.last_good_quotes.get(symbol_key)
+    if isinstance(cached_quote, dict) and safe_number(cached_quote.get("price")) is not None:
+        message = f"Rate limited by data provider. Showing cached quote for {symbol_key}."
+        st.session_state.quote_fetch_cache[cooldown_key] = {
+            "fetched_at": now_ts,
+            "quote": cached_quote,
+            "note": message,
+        }
+        return cached_quote, message
+
+    if last_error is not None:
+        raise last_error
+    raise ValueError("Unable to load quote data.")
 
 
 def build_price_chart(
@@ -1324,13 +1519,12 @@ def render_watchlist_display() -> None:
             current_price_str = "—"
             try:
                 allow_insecure_ssl = st.session_state.get("allow_insecure_ssl", False)
-                watch_history, _, _, _ = load_stock_bundle_resilient(
+                watch_quote, _ = load_stock_quote_resilient(
                     sym,
-                    "1 Day",
                     allow_insecure_ssl,
                     force_reload=st.session_state.get("last_refresh"),
                 )
-                current_price = safe_number(watch_history.iloc[-1]["Close"])
+                current_price = safe_number(watch_quote.get("price"))
                 if current_price:
                     if currency_mode == "CAD":
                         fx_rate = get_usd_cad_rate()
@@ -1763,17 +1957,18 @@ def evaluate_alerts(
             continue
 
         try:
-            history, _, _, _ = load_stock_bundle_resilient(
+            quote_data, quote_note = load_stock_quote_resilient(
                 symbol,
-                "1 Day",
                 allow_insecure_ssl,
                 force_reload=st.session_state.get("last_refresh"),
             )
+            if quote_note:
+                notifications.append(f"{symbol}: {quote_note}")
         except Exception as error:
             notifications.append(f"{symbol}: failed to evaluate alert ({error})")
             continue
 
-        current_price = safe_number(history.iloc[-1]["Close"])
+        current_price = safe_number(quote_data.get("price"))
         target_price = safe_number(alert.get("target"))
         direction = alert.get("direction")
         if current_price is None or target_price is None:
