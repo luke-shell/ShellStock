@@ -1859,7 +1859,7 @@ def render_alert_manager(default_symbol: str) -> list[str]:
             target_currency = alert.get("target_currency", "USD")
             alert_rows.append(
                 {
-                    "#": index,
+                    "Select": False,
                     "Ticker": alert["symbol"],
                     "Condition": f"{alert['direction']} ${alert['target']:.2f} {target_currency}",
                     "Enabled": "✓" if alert.get("enabled", True) else "✗",
@@ -1867,43 +1867,50 @@ def render_alert_manager(default_symbol: str) -> list[str]:
                 }
             )
 
-        st.dataframe(pd.DataFrame(alert_rows), use_container_width=True, hide_index=True)
-
-        alert_options = list(range(len(st.session_state.alerts)))
-
-        def _format_alert_option(idx: int) -> str:
-            selected_alert = st.session_state.alerts[idx]
-            selected_currency = selected_alert.get("target_currency", "USD")
-            status = "Enabled" if selected_alert.get("enabled", True) else "Disabled"
-            sent_status = "Sent" if selected_alert.get("sent", False) else "Not sent"
-            return (
-                f"{selected_alert.get('symbol', '')}: {selected_alert.get('direction', 'above')} "
-                f"${float(selected_alert.get('target', 0)):.2f} {selected_currency} | {status} | {sent_status}"
-            )
-
-        selected_index = st.selectbox(
-            "Select alert to manage",
-            options=alert_options,
-            format_func=_format_alert_option,
-            key="selected_alert_index",
+        alert_df = pd.DataFrame(alert_rows)
+        edited_alert_df = st.data_editor(
+            alert_df,
+            use_container_width=True,
+            hide_index=True,
+            key="alerts_table_editor",
+            column_config={
+                "Select": st.column_config.CheckboxColumn("Select", help="Pick one alert"),
+            },
+            disabled=["Ticker", "Condition", "Enabled", "Sent"],
         )
+
+        selected_alert_positions = [
+            idx for idx, selected in enumerate(edited_alert_df.get("Select", [])) if bool(selected)
+        ]
+        selected_index = selected_alert_positions[0] if selected_alert_positions else None
+        if len(selected_alert_positions) > 1:
+            st.caption("Multiple alerts selected. Actions will use the first selected row.")
 
         action_left, action_mid, action_right = st.columns(3)
         if action_left.button("Toggle enable", use_container_width=True):
-            st.session_state.alerts[int(selected_index)]["enabled"] = not st.session_state.alerts[int(selected_index)].get(
-                "enabled", True
-            )
-            set_persistent_data_key("alerts", st.session_state.alerts)
-            st.rerun()
+            if selected_index is None:
+                st.warning("Select an alert row first.")
+            else:
+                st.session_state.alerts[int(selected_index)]["enabled"] = not st.session_state.alerts[int(selected_index)].get(
+                    "enabled", True
+                )
+                set_persistent_data_key("alerts", st.session_state.alerts)
+                st.rerun()
         if action_mid.button("Reset sent", use_container_width=True):
-            st.session_state.alerts[int(selected_index)]["sent"] = False
-            st.session_state.alerts[int(selected_index)].pop("triggered_at", None)
-            set_persistent_data_key("alerts", st.session_state.alerts)
-            st.rerun()
+            if selected_index is None:
+                st.warning("Select an alert row first.")
+            else:
+                st.session_state.alerts[int(selected_index)]["sent"] = False
+                st.session_state.alerts[int(selected_index)].pop("triggered_at", None)
+                set_persistent_data_key("alerts", st.session_state.alerts)
+                st.rerun()
         if action_right.button("Delete alert", use_container_width=True):
-            st.session_state.alerts.pop(int(selected_index))
-            set_persistent_data_key("alerts", st.session_state.alerts)
-            st.rerun()
+            if selected_index is None:
+                st.warning("Select an alert row first.")
+            else:
+                st.session_state.alerts.pop(int(selected_index))
+                set_persistent_data_key("alerts", st.session_state.alerts)
+                st.rerun()
     else:
         st.info("No alerts created yet.")
 
@@ -1933,58 +1940,70 @@ def render_alert_manager(default_symbol: str) -> list[str]:
             for idx, item in enumerate(filtered_notifications):
                 display_rows.append(
                     {
+                        "Select": False,
                         "When": item.get("created_at", ""),
                         "Status": item.get("status", "active"),
                         "Title": item.get("title", ""),
                         "Message": item.get("message", ""),
                     }
                 )
-            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
 
-            notification_ids = [str(item.get("id", "")) for item in filtered_notifications]
-
-            def _format_notification_option(notification_id: str) -> str:
-                selected_note = next(
-                    (entry for entry in filtered_notifications if str(entry.get("id", "")) == str(notification_id)),
-                    {},
-                )
-                when_text = selected_note.get("created_at", "")
-                title_text = selected_note.get("title", "")
-                status_text = selected_note.get("status", "active")
-                return f"{when_text} | {status_text} | {title_text}"
-
-            selected_id = st.selectbox(
-                "Select notification to manage",
-                options=notification_ids,
-                format_func=_format_notification_option,
-                key="selected_notification_id",
+            notifications_df = pd.DataFrame(display_rows)
+            edited_notifications_df = st.data_editor(
+                notifications_df,
+                use_container_width=True,
+                hide_index=True,
+                key="notifications_table_editor",
+                column_config={
+                    "Select": st.column_config.CheckboxColumn("Select", help="Pick one notification"),
+                },
+                disabled=["When", "Status", "Title", "Message"],
             )
+
+            selected_notification_positions = [
+                idx for idx, selected in enumerate(edited_notifications_df.get("Select", [])) if bool(selected)
+            ]
+            selected_notification_idx = selected_notification_positions[0] if selected_notification_positions else None
+            if len(selected_notification_positions) > 1:
+                st.caption("Multiple notifications selected. Actions will use the first selected row.")
 
             action_col_1, action_col_2, action_col_3 = st.columns(3)
 
             if action_col_1.button("Archive selected", use_container_width=True):
-                for item in history:
-                    if str(item.get("id", "")) == str(selected_id):
-                        item["status"] = "archived"
-                        break
-                st.session_state.notification_history = history
-                set_persistent_data_key("notification_history", history)
-                st.rerun()
+                if selected_notification_idx is None:
+                    st.warning("Select a notification row first.")
+                else:
+                    selected_id = str(filtered_notifications[int(selected_notification_idx)].get("id", ""))
+                    for item in history:
+                        if str(item.get("id", "")) == selected_id:
+                            item["status"] = "archived"
+                            break
+                    st.session_state.notification_history = history
+                    set_persistent_data_key("notification_history", history)
+                    st.rerun()
 
             if action_col_2.button("Unarchive selected", use_container_width=True):
-                for item in history:
-                    if str(item.get("id", "")) == str(selected_id):
-                        item["status"] = "active"
-                        break
-                st.session_state.notification_history = history
-                set_persistent_data_key("notification_history", history)
-                st.rerun()
+                if selected_notification_idx is None:
+                    st.warning("Select a notification row first.")
+                else:
+                    selected_id = str(filtered_notifications[int(selected_notification_idx)].get("id", ""))
+                    for item in history:
+                        if str(item.get("id", "")) == selected_id:
+                            item["status"] = "active"
+                            break
+                    st.session_state.notification_history = history
+                    set_persistent_data_key("notification_history", history)
+                    st.rerun()
 
             if action_col_3.button("Delete selected", use_container_width=True):
-                history = [item for item in history if str(item.get("id", "")) != str(selected_id)]
-                st.session_state.notification_history = history
-                set_persistent_data_key("notification_history", history)
-                st.rerun()
+                if selected_notification_idx is None:
+                    st.warning("Select a notification row first.")
+                else:
+                    selected_id = str(filtered_notifications[int(selected_notification_idx)].get("id", ""))
+                    history = [item for item in history if str(item.get("id", "")) != selected_id]
+                    st.session_state.notification_history = history
+                    set_persistent_data_key("notification_history", history)
+                    st.rerun()
 
     pending_notifications: list[str] = []
     last_scan_at = float(st.session_state.get("last_alert_scan_at", 0.0) or 0.0)
