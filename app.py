@@ -72,6 +72,15 @@ def _get_supabase_client() -> Any:
         return None
 
 
+def _get_auth_redirect_url() -> str | None:
+    """Optional redirect URL used by Supabase email links (signup/recovery)."""
+    try:
+        redirect = str(st.secrets.get("AUTH_REDIRECT_URL", "")).strip()
+        return redirect or None
+    except Exception:
+        return None
+
+
 def _save_auth_session(auth_response: Any) -> bool:
     session = getattr(auth_response, "session", None)
     user = getattr(auth_response, "user", None)
@@ -142,14 +151,102 @@ def _sign_up_supabase(email: str, password: str) -> tuple[bool, str]:
     if client is None:
         return False, "Supabase client is not configured."
 
+    payload: dict[str, Any] = {"email": email, "password": password}
+    redirect_url = _get_auth_redirect_url()
+    if redirect_url:
+        payload["options"] = {"email_redirect_to": redirect_url}
+
     try:
-        response = client.auth.sign_up({"email": email, "password": password})
+        response = client.auth.sign_up(payload)
     except Exception as error:
         return False, str(error)
 
     if _save_auth_session(response):
         return True, "Account created and signed in."
     return True, "Account created. Check your email for confirmation, then sign in."
+
+
+def _send_password_reset_email(email: str) -> tuple[bool, str]:
+    client = _get_supabase_client()
+    if client is None:
+        return False, "Supabase client is not configured."
+
+    redirect_url = _get_auth_redirect_url()
+
+    try:
+        if redirect_url:
+            try:
+                client.auth.reset_password_email(email, {"redirect_to": redirect_url})
+            except TypeError:
+                client.auth.reset_password_email(email)
+        else:
+            client.auth.reset_password_email(email)
+        return True, "Password reset email sent. Use the link in your inbox."
+    except Exception as error:
+        return False, str(error)
+
+
+def _update_password_supabase(new_password: str) -> tuple[bool, str]:
+    client = _get_authenticated_supabase_client()
+    if client is None:
+        return False, "No active recovery session. Open the latest reset link again."
+
+    try:
+        client.auth.update_user({"password": new_password})
+        st.session_state.supabase_recovery_mode = False
+        return True, "Password updated successfully."
+    except Exception as error:
+        return False, str(error)
+
+
+def _clear_auth_query_params() -> None:
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
+
+
+def _handle_supabase_auth_callback() -> None:
+    """Process Supabase email-link callbacks for signup confirmation and recovery."""
+    if not _supabase_configured():
+        return
+
+    try:
+        query_params = st.query_params
+        token_hash = query_params.get("token_hash")
+        callback_type = query_params.get("type")
+    except Exception:
+        return
+
+    if not token_hash or callback_type not in ("signup", "recovery"):
+        return
+
+    client = _get_supabase_client()
+    if client is None:
+        return
+
+    try:
+        response = client.auth.verify_otp({"type": callback_type, "token_hash": token_hash})
+        if callback_type == "signup":
+            if _save_auth_session(response):
+                st.session_state.auth_callback_message = ("success", "Email confirmed and signed in.")
+            else:
+                st.session_state.auth_callback_message = ("success", "Email confirmed. You can now sign in.")
+        else:
+            _save_auth_session(response)
+            st.session_state.supabase_recovery_mode = True
+            st.session_state.auth_callback_message = (
+                "success",
+                "Recovery link verified. Set your new password below.",
+            )
+    except Exception as error:
+        st.session_state.auth_callback_message = (
+            "error",
+            f"Auth link handling failed: {error}",
+        )
+
+    _clear_auth_query_params()
+    st.rerun()
 
 
 def _load_from_supabase() -> dict[str, Any]:
@@ -1783,7 +1880,15 @@ def render_auth_gate() -> bool:
     st.subheader("Sign in to access your saved data")
     st.caption("Your holdings, watchlist, notes, alerts, and notification history are saved per user account.")
 
-    tab_sign_in, tab_sign_up = st.tabs(["Sign In", "Create Account"])
+    callback_message = st.session_state.pop("auth_callback_message", None)
+    if callback_message:
+        level, text = callback_message
+        if level == "success":
+            st.success(text)
+        else:
+            st.error(text)
+
+    tab_sign_in, tab_sign_up, tab_forgot = st.tabs(["Sign In", "Create Account", "Forgot Password"])
 
     with tab_sign_in:
         with st.form("supabase_sign_in_form"):
@@ -1814,6 +1919,34 @@ def render_auth_gate() -> bool:
             else:
                 st.error(message)
 
+    with tab_forgot:
+        with st.form("supabase_forgot_password_form"):
+            forgot_email = st.text_input("Email", key="supabase_forgot_email")
+            forgot_submitted = st.form_submit_button("Send reset link", use_container_width=True)
+
+        if forgot_submitted:
+            ok, message = _send_password_reset_email(forgot_email.strip())
+            if ok:
+                st.success(message)
+                if not _get_auth_redirect_url():
+                    st.caption("Tip: set AUTH_REDIRECT_URL in Streamlit secrets to avoid broken redirect pages.")
+            else:
+                st.error(message)
+
+        if st.session_state.get("supabase_recovery_mode", False):
+            st.markdown("---")
+            st.caption("Recovery session detected. Set your new password.")
+            with st.form("supabase_set_new_password_form"):
+                new_password = st.text_input("New password", type="password", key="supabase_new_password")
+                update_submitted = st.form_submit_button("Update password", use_container_width=True)
+
+            if update_submitted:
+                ok, message = _update_password_supabase(new_password)
+                if ok:
+                    st.success(message)
+                else:
+                    st.error(message)
+
     return False
 
 
@@ -1834,6 +1967,7 @@ def render_auth_sidebar_controls() -> None:
 
 def main() -> None:
     apply_custom_theme()
+    _handle_supabase_auth_callback()
 
     if _supabase_configured() and not render_auth_gate():
         return

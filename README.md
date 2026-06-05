@@ -46,9 +46,20 @@ In Streamlit Cloud app settings, add:
 ```toml
 SUPABASE_URL = "https://YOUR-PROJECT.supabase.co"
 SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY"
+AUTH_REDIRECT_URL = "https://YOUR-STREAMLIT-APP-URL.streamlit.app"
 ```
 
 When these secrets are present, the app uses Supabase and requires user sign-in.
+
+### 2.1) Fix confirmation/recovery redirect links
+
+In Supabase dashboard:
+
+- Go to Authentication > URL Configuration.
+- Set Site URL to your Streamlit app URL.
+- Add your Streamlit app URL to Redirect URLs.
+
+This prevents broken confirmation or password-recovery links.
 
 ### 3) Authentication and data isolation
 
