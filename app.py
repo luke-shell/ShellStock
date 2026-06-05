@@ -27,6 +27,8 @@ except Exception:
 
 # Persistence file path
 PERSISTENCE_FILE = os.path.expanduser("~/.shellstock_data.json")
+AUTH_SESSION_FILE = os.path.expanduser("~/.shellstock_auth.json")
+AUTH_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 st.set_page_config(
@@ -131,6 +133,26 @@ def _save_auth_session(auth_response: Any) -> bool:
     st.session_state.supabase_refresh_token = refresh_token
     st.session_state.supabase_user_id = user_id
     st.session_state.supabase_user_email = user_email
+    now_ts = int(time.time())
+    expires_at = now_ts + AUTH_SESSION_TTL_SECONDS
+
+    try:
+        with open(AUTH_SESSION_FILE, "w") as f:
+            json.dump(
+                {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "user_id": user_id,
+                    "user_email": user_email,
+                    "saved_at": now_ts,
+                    "expires_at": expires_at,
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        pass
+
     return True
 
 
@@ -139,6 +161,78 @@ def _clear_auth_session() -> None:
     st.session_state.pop("supabase_refresh_token", None)
     st.session_state.pop("supabase_user_id", None)
     st.session_state.pop("supabase_user_email", None)
+    try:
+        if os.path.exists(AUTH_SESSION_FILE):
+            os.remove(AUTH_SESSION_FILE)
+    except Exception:
+        pass
+
+
+def _restore_auth_session() -> bool:
+    """Restore persisted auth tokens so login survives app/browser restarts until sign out."""
+    if not _supabase_configured():
+        return False
+
+    if _supabase_user_id():
+        return True
+
+    if not os.path.exists(AUTH_SESSION_FILE):
+        return False
+
+    try:
+        with open(AUTH_SESSION_FILE, "r") as f:
+            saved = json.load(f)
+    except Exception:
+        return False
+
+    access_token = saved.get("access_token")
+    refresh_token = saved.get("refresh_token")
+    if not (access_token and refresh_token):
+        return False
+
+    now_ts = int(time.time())
+    expires_at = saved.get("expires_at")
+    if expires_at is None:
+        # Backward compatibility: infer expiry from file mtime for older saved sessions.
+        try:
+            inferred_saved_at = int(os.path.getmtime(AUTH_SESSION_FILE))
+        except Exception:
+            inferred_saved_at = now_ts
+        expires_at = inferred_saved_at + AUTH_SESSION_TTL_SECONDS
+
+    try:
+        expires_at_int = int(expires_at)
+    except Exception:
+        _clear_auth_session()
+        return False
+
+    if now_ts >= expires_at_int:
+        _clear_auth_session()
+        return False
+
+    st.session_state.supabase_access_token = access_token
+    st.session_state.supabase_refresh_token = refresh_token
+    st.session_state.supabase_user_id = saved.get("user_id")
+    st.session_state.supabase_user_email = saved.get("user_email")
+
+    client = _get_authenticated_supabase_client()
+    if client is None:
+        _clear_auth_session()
+        return False
+
+    try:
+        response = client.auth.get_user()
+        user = getattr(response, "user", None)
+        user_id = getattr(user, "id", None)
+        if not user_id:
+            _clear_auth_session()
+            return False
+        st.session_state.supabase_user_id = user_id
+        st.session_state.supabase_user_email = getattr(user, "email", "")
+        return True
+    except Exception:
+        _clear_auth_session()
+        return False
 
 
 def _supabase_user_id() -> str | None:
@@ -2487,6 +2581,7 @@ def render_auth_sidebar_controls() -> None:
 def main() -> None:
     apply_custom_theme()
     _handle_supabase_auth_callback()
+    _restore_auth_session()
 
     if _supabase_configured() and not render_auth_gate():
         return
