@@ -1887,22 +1887,13 @@ def render_holding_manager() -> str:
     holdings: dict[str, dict[str, float | None]] = st.session_state.holdings
     symbols = sorted(holdings.keys())
 
-    if not symbols:
-        holdings["AAPL"] = {
-            "must_sell": None,
-            "purchase_price_usd": None,
-            "purchase_price_cad": None,
-            "reasonable_lower": None,
-            "reasonable_upper": None,
-            "broker": "RBC",
-            "quantity": None,
-        }
-        symbols = ["AAPL"]
-
-    current_selected = st.session_state.selected_holding
-    if current_selected not in holdings:
-        current_selected = symbols[0]
-        st.session_state.selected_holding = current_selected
+    current_selected = st.session_state.get("selected_holding", "")
+    if symbols:
+        if current_selected not in holdings:
+            current_selected = symbols[0]
+            st.session_state.selected_holding = current_selected
+    else:
+        st.session_state.selected_holding = ""
 
     # Get currency mode and FX rate for display
     currency_mode = st.session_state.get("currency_mode", "USD")
@@ -1939,73 +1930,76 @@ def render_holding_manager() -> str:
             "broker": holding.get("broker", "RBC"),
         })
     
-    # Create clickable table
-    cols = st.columns([1, 1.5, 1.5, 2, 1.5, 1])
-    with cols[0]:
-        st.write("**Ticker**")
-    with cols[1]:
-        st.write("**Quantity**")
-    with cols[2]:
-        st.write(f"**Purchase Price ({currency_mode})**")
-    with cols[3]:
-        st.write(f"**Book Cost ({currency_mode})**")
-    with cols[4]:
-        st.write("**Broker**")
-    with cols[5]:
-        st.write("**Action**")
-    
-    for holding_data in holdings_data:
+    if not holdings_data:
+        st.info("No holdings yet. Add a ticker below.")
+    else:
+        # Create clickable table
         cols = st.columns([1, 1.5, 1.5, 2, 1.5, 1])
         with cols[0]:
-            if st.button(
-                holding_data["symbol"],
-                key=f"select_{holding_data['symbol']}",
-                use_container_width=True
-            ):
-                st.session_state.selected_holding = holding_data["symbol"]
-                st.session_state.selected_watchlist_symbol = ""
-                set_persistent_data_key("selected_holding", holding_data["symbol"])
-                st.rerun()
+            st.write("**Ticker**")
         with cols[1]:
-            qty_str = f"{holding_data['quantity']:.4f}" if holding_data["quantity"] else "-"
-            st.write(qty_str)
+            st.write("**Quantity**")
         with cols[2]:
-            # Display purchase price in selected currency (prefer explicit field)
-            price_str = "-"
-            if currency_mode == "CAD":
-                if holding_data.get("purchase_price_cad") is not None:
-                    price_display = holding_data.get("purchase_price_cad")
-                    price_str = f"${price_display:.2f}"
-                elif holding_data.get("purchase_price_usd") is not None:
-                    price_display = holding_data.get("purchase_price_usd") * fx_rate
-                    price_str = f"${price_display:.2f}"
-            else:
-                if holding_data.get("purchase_price_usd") is not None:
-                    price_display = holding_data.get("purchase_price_usd")
-                    price_str = f"${price_display:.2f}"
-                elif holding_data.get("purchase_price_cad") is not None and fx_rate and fx_rate > 0:
-                    price_display = holding_data.get("purchase_price_cad") / fx_rate
-                    price_str = f"${price_display:.2f}"
-            st.write(price_str)
+            st.write(f"**Purchase Price ({currency_mode})**")
         with cols[3]:
-            if holding_data["book_cost"]:
-                # book_cost is stored in USD base, convert for display
-                cost_display = holding_data["book_cost"] * fx_rate
-                cost_str = f"${cost_display:.2f}"
-            else:
-                cost_str = "-"
-            st.write(cost_str)
+            st.write(f"**Book Cost ({currency_mode})**")
         with cols[4]:
-            st.write(holding_data["broker"])
+            st.write("**Broker**")
         with cols[5]:
-            remove_symbol = holding_data["symbol"]
-            if st.button("Remove", key=f"remove_holding_{remove_symbol}", use_container_width=True):
-                if len(holdings) <= 1:
-                    st.warning("At least one holding must remain.")
+            st.write("**Action**")
+        
+        for holding_data in holdings_data:
+            cols = st.columns([1, 1.5, 1.5, 2, 1.5, 1])
+            with cols[0]:
+                if st.button(
+                    holding_data["symbol"],
+                    key=f"select_{holding_data['symbol']}",
+                    use_container_width=True
+                ):
+                    st.session_state.selected_holding = holding_data["symbol"]
+                    st.session_state.selected_watchlist_symbol = ""
+                    set_persistent_data_key("selected_holding", holding_data["symbol"])
+                    st.rerun()
+            with cols[1]:
+                qty_str = f"{holding_data['quantity']:.4f}" if holding_data["quantity"] else "-"
+                st.write(qty_str)
+            with cols[2]:
+                # Display purchase price in selected currency (prefer explicit field)
+                price_str = "-"
+                if currency_mode == "CAD":
+                    if holding_data.get("purchase_price_cad") is not None:
+                        price_display = holding_data.get("purchase_price_cad")
+                        price_str = f"${price_display:.2f}"
+                    elif holding_data.get("purchase_price_usd") is not None:
+                        price_display = holding_data.get("purchase_price_usd") * fx_rate
+                        price_str = f"${price_display:.2f}"
                 else:
+                    if holding_data.get("purchase_price_usd") is not None:
+                        price_display = holding_data.get("purchase_price_usd")
+                        price_str = f"${price_display:.2f}"
+                    elif holding_data.get("purchase_price_cad") is not None and fx_rate and fx_rate > 0:
+                        price_display = holding_data.get("purchase_price_cad") / fx_rate
+                        price_str = f"${price_display:.2f}"
+                st.write(price_str)
+            with cols[3]:
+                if holding_data["book_cost"]:
+                    # book_cost is stored in USD base, convert for display
+                    cost_display = holding_data["book_cost"] * fx_rate
+                    cost_str = f"${cost_display:.2f}"
+                else:
+                    cost_str = "-"
+                st.write(cost_str)
+            with cols[4]:
+                st.write(holding_data["broker"])
+            with cols[5]:
+                remove_symbol = holding_data["symbol"]
+                if st.button("X", key=f"remove_holding_{remove_symbol}", use_container_width=True):
                     holdings.pop(remove_symbol, None)
-                    if st.session_state.selected_holding == remove_symbol:
-                        st.session_state.selected_holding = sorted(holdings.keys())[0]
+                    if holdings:
+                        if st.session_state.selected_holding == remove_symbol:
+                            st.session_state.selected_holding = sorted(holdings.keys())[0]
+                    else:
+                        st.session_state.selected_holding = ""
                     set_persistent_data_key("holdings", st.session_state.holdings)
                     set_persistent_data_key("selected_holding", st.session_state.selected_holding)
                     st.warning(f"Removed {remove_symbol} from holdings.")
