@@ -438,7 +438,10 @@ def apply_custom_theme() -> None:
             }
 
             /* Keep yellow annotation labels readable in all themes. */
-            .js-plotly-plot .annotation-text {
+            .js-plotly-plot .annotation-text,
+            .js-plotly-plot .annotation text,
+            .js-plotly-plot g.annotation text,
+            .js-plotly-plot g.annotation text tspan {
                 fill: #000000 !important;
             }
 
@@ -1924,6 +1927,7 @@ def render_alert_manager(default_symbol: str) -> list[str]:
             options=["Active", "Archived", "All"],
             horizontal=True,
             key="notification_filter",
+            label_visibility="collapsed",
         )
 
         if status_filter == "Active":
