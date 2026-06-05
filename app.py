@@ -2652,6 +2652,20 @@ def main() -> None:
             if live_quote_note:
                 st.caption(live_quote_note)
 
+            # Time range selector placed to the right of the watchlist chart
+            range_keys = list(INTERVAL_OPTIONS.keys())
+            col_chart, col_range = st.columns([3, 1])
+            with col_range:
+                selected_range = st.select_slider(
+                    "",
+                    options=range_keys,
+                    value=range_label,
+                    key="watchlist_range_selector_slider",
+                )
+                if selected_range != range_label:
+                    st.session_state["range_label"] = selected_range
+                    st.rerun()
+
             # Show chart
             preview_holding = {"broker": "RBC", "quantity": None, "purchase_price_usd": None, "purchase_price_cad": None, "must_sell": None, "reasonable_lower": None, "reasonable_upper": None}
             st.plotly_chart(build_price_chart(history, symbol, range_label, preview_holding), use_container_width=True)
@@ -2747,9 +2761,39 @@ def main() -> None:
         )
     except Exception as error:
         if is_rate_limited_error(error):
-            st.error(
-                f"Data provider rate limit reached for {symbol}. Please wait a minute and try Refresh Now."
+            st.warning(
+                f"Data provider is temporarily rate-limiting requests for {symbol}. "
+                "Showing quote-only fallback when available."
             )
+            try:
+                fallback_quote, fallback_note = load_stock_quote_resilient(
+                    symbol,
+                    allow_insecure_ssl,
+                    force_reload=st.session_state.get("last_refresh"),
+                )
+                fallback_price = safe_number(fallback_quote.get("price"))
+                fallback_ts = fallback_quote.get("timestamp", "N/A")
+                if fallback_price is not None:
+                    currency_mode = st.session_state.get("currency_mode", "USD")
+                    if currency_mode == "CAD":
+                        fx_rate = get_usd_cad_rate()
+                        display_price = fallback_price * fx_rate
+                    else:
+                        display_price = fallback_price
+                    st.metric("Latest Quote", f"${display_price:.2f} {currency_mode}")
+                    st.caption(f"Quote timestamp: {fallback_ts}")
+                if fallback_note:
+                    st.caption(fallback_note)
+            except Exception:
+                cooldown_remaining = get_provider_cooldown_remaining_seconds()
+                if cooldown_remaining > 0:
+                    st.info(
+                        f"Provider cooldown in effect for about {cooldown_remaining}s. "
+                        "Try Refresh Now after cooldown expires."
+                    )
+                else:
+                    st.info("Quote fallback is temporarily unavailable. Try again in a moment.")
+            st.link_button("Open in Yahoo Finance", f"https://finance.yahoo.com/quote/{symbol}")
         else:
             st.error(f"Unable to load data for {symbol}: {error}")
         if "CERTIFICATE_VERIFY_FAILED" in str(error) and not allow_insecure_ssl:
