@@ -631,35 +631,63 @@ def set_persistent_data_key(key: str, value: Any) -> None:
 def initialize_state() -> None:
     if "holdings" not in st.session_state:
         persisted_holdings = get_persistent_data_key("holdings", {})
-        if not persisted_holdings:
-            persisted_holdings = {}
-        else:
-            # Migrate any legacy `purchase_price` fields into `purchase_price_usd` for compatibility
-            for sym, h in list(persisted_holdings.items()):
-                normalized_symbol = sanitize_symbol(str(sym))
-                if not normalized_symbol:
-                    persisted_holdings.pop(sym, None)
+        normalized_holdings: dict[str, dict[str, Any]] = {}
+
+        if isinstance(persisted_holdings, dict):
+            for raw_key, raw_holding in persisted_holdings.items():
+                if not isinstance(raw_holding, dict):
                     continue
-                if normalized_symbol != sym:
-                    persisted_holdings[normalized_symbol] = persisted_holdings.pop(sym)
-                    h = persisted_holdings[normalized_symbol]
-                if isinstance(h, dict):
-                    if "purchase_price" in h and "purchase_price_usd" not in h:
-                        h["purchase_price_usd"] = h.get("purchase_price")
-                        h.pop("purchase_price", None)
-                    # Ensure both keys exist
-                    h.setdefault("purchase_price_usd", None)
-                    h.setdefault("purchase_price_cad", None)
-                    if "purchase_currency" not in h:
-                        if h.get("purchase_price_cad") is not None and h.get("purchase_price_usd") is None:
-                            h["purchase_currency"] = "CAD"
-                        else:
-                            h["purchase_currency"] = "USD"
-        st.session_state.holdings = persisted_holdings
+
+                holding = dict(raw_holding)
+                symbol_from_value = sanitize_symbol(str(holding.get("symbol", "")))
+                symbol_from_key = sanitize_symbol(str(raw_key))
+                normalized_symbol = symbol_from_value or symbol_from_key
+                if not normalized_symbol:
+                    continue
+
+                if "purchase_price" in holding and "purchase_price_usd" not in holding:
+                    holding["purchase_price_usd"] = holding.get("purchase_price")
+                    holding.pop("purchase_price", None)
+
+                holding.setdefault("purchase_price_usd", None)
+                holding.setdefault("purchase_price_cad", None)
+                if "purchase_currency" not in holding:
+                    if holding.get("purchase_price_cad") is not None and holding.get("purchase_price_usd") is None:
+                        holding["purchase_currency"] = "CAD"
+                    else:
+                        holding["purchase_currency"] = "USD"
+
+                holding.setdefault("must_sell", None)
+                holding.setdefault("reasonable_lower", None)
+                holding.setdefault("reasonable_upper", None)
+                holding.setdefault("broker", "RBC")
+                holding.setdefault("quantity", None)
+                holding["symbol"] = normalized_symbol
+
+                # Preserve ID-style keys when already migrated; otherwise generate a new lot ID.
+                if "symbol" in raw_holding and str(raw_key) not in normalized_holdings:
+                    holding_id = str(raw_key)
+                else:
+                    holding_id = _next_holding_id(normalized_symbol, set(normalized_holdings.keys()))
+
+                normalized_holdings[holding_id] = holding
+
+        st.session_state.holdings = normalized_holdings
     
     if "selected_holding" not in st.session_state:
-        persisted_selected_holding = sanitize_symbol(get_persistent_data_key("selected_holding", ""))
-        st.session_state.selected_holding = persisted_selected_holding
+        persisted_selected_holding = str(get_persistent_data_key("selected_holding", "") or "")
+        holdings = st.session_state.holdings
+        selected_holding_id = ""
+        if persisted_selected_holding in holdings:
+            selected_holding_id = persisted_selected_holding
+        else:
+            selected_symbol = sanitize_symbol(persisted_selected_holding)
+            if selected_symbol:
+                for hid, holding in holdings.items():
+                    if sanitize_symbol(str(holding.get("symbol", ""))) == selected_symbol:
+                        selected_holding_id = hid
+                        break
+        st.session_state.selected_holding = selected_holding_id
     
     if "alerts" not in st.session_state:
         st.session_state.alerts = get_persistent_data_key("alerts", [])
@@ -946,6 +974,30 @@ def sanitize_symbol(value: str) -> str:
     return value.strip().upper()
 
 
+def _default_holding(symbol: str) -> dict[str, Any]:
+    return {
+        "symbol": sanitize_symbol(symbol),
+        "must_sell": None,
+        "purchase_price_usd": None,
+        "purchase_price_cad": None,
+        "purchase_currency": "USD",
+        "reasonable_lower": None,
+        "reasonable_upper": None,
+        "broker": "RBC",
+        "quantity": None,
+    }
+
+
+def _next_holding_id(symbol: str, existing_ids: set[str]) -> str:
+    base = f"{sanitize_symbol(symbol)}__"
+    index = 1
+    candidate = f"{base}{index}"
+    while candidate in existing_ids:
+        index += 1
+        candidate = f"{base}{index}"
+    return candidate
+
+
 def parse_optional_price(value: str) -> float | None:
     raw = value.strip()
     if not raw:
@@ -953,23 +1005,27 @@ def parse_optional_price(value: str) -> float | None:
     return float(raw)
 
 
-def get_holding(symbol: str) -> dict[str, float | None]:
-    symbol = sanitize_symbol(symbol)
-    if not symbol:
+def create_holding(symbol: str) -> str:
+    normalized_symbol = sanitize_symbol(symbol)
+    if not normalized_symbol:
         raise ValueError("Ticker symbol cannot be empty.")
-    holdings: dict[str, dict[str, float | None]] = st.session_state.holdings
-    if symbol not in holdings:
-        holdings[symbol] = {
-            "must_sell": None,
-            "purchase_price_usd": None,
-            "purchase_price_cad": None,
-            "purchase_currency": "USD",
-            "reasonable_lower": None,
-            "reasonable_upper": None,
-            "broker": "RBC",
-            "quantity": None,
-        }
-    return holdings[symbol]
+    holdings: dict[str, dict[str, Any]] = st.session_state.holdings
+    holding_id = _next_holding_id(normalized_symbol, set(holdings.keys()))
+    holdings[holding_id] = _default_holding(normalized_symbol)
+    return holding_id
+
+
+def get_holding(holding_id: str) -> dict[str, Any]:
+    holdings: dict[str, dict[str, Any]] = st.session_state.holdings
+    if not holding_id or holding_id not in holdings:
+        raise ValueError("Holding ID is invalid.")
+    return holdings[holding_id]
+
+
+def get_holding_symbol(holding_id: str) -> str:
+    holdings: dict[str, dict[str, Any]] = st.session_state.holdings
+    holding = holdings.get(holding_id, {}) if isinstance(holdings, dict) else {}
+    return sanitize_symbol(str(holding.get("symbol", "")))
 
 
 def create_insecure_session() -> Any:
@@ -1624,9 +1680,9 @@ def render_metric_cards(info: dict[str, Any], history: pd.DataFrame, holding: di
                 color = "green" if today_delta >= 0 else "red"
                 return_text = f"+{today_return_pct:.2f}%" if today_delta >= 0 else f"{today_return_pct:.2f}%"
                 delta_val = today_delta * fx_rate
-                delta_text = f"+${delta_val:.2f}" if today_delta >= 0 else f"${delta_val:.2f}"
+                delta_text = f"+${delta_val:.2f} {currency_mode}" if today_delta >= 0 else f"${delta_val:.2f} {currency_mode}"
                 st.metric(
-                    "Today's Return",
+                    f"Today's Return ({currency_mode})",
                     return_text,
                     delta=delta_text,
                     delta_color="off"
@@ -1637,9 +1693,9 @@ def render_metric_cards(info: dict[str, Any], history: pd.DataFrame, holding: di
                 color = "green" if total_delta >= 0 else "red"
                 return_text = f"+{total_return_pct:.2f}%" if total_delta >= 0 else f"{total_return_pct:.2f}%"
                 delta_val = total_delta * fx_rate
-                delta_text = f"+${delta_val:.2f}" if total_delta >= 0 else f"${delta_val:.2f}"
+                delta_text = f"+${delta_val:.2f} {currency_mode}" if total_delta >= 0 else f"${delta_val:.2f} {currency_mode}"
                 st.metric(
-                    "Total Return",
+                    f"Total Return ({currency_mode})",
                     return_text,
                     delta=delta_text,
                     delta_color="off"
@@ -1908,34 +1964,39 @@ def render_notes_panel(selected_symbol: str) -> None:
 
 def render_holding_manager() -> str:
     st.markdown("### 📊 My Holdings")
-    
-    holdings: dict[str, dict[str, float | None]] = st.session_state.holdings
-    symbols = sorted(holdings.keys())
+
+    holdings: dict[str, dict[str, Any]] = st.session_state.holdings
+    holding_ids = sorted(
+        holdings.keys(),
+        key=lambda hid: (
+            sanitize_symbol(str(holdings.get(hid, {}).get("symbol", ""))),
+            hid,
+        ),
+    )
 
     current_selected = st.session_state.get("selected_holding", "")
-    if symbols:
+    if holding_ids:
         if current_selected not in holdings:
-            current_selected = symbols[0]
+            current_selected = ""
             st.session_state.selected_holding = current_selected
     else:
         st.session_state.selected_holding = ""
 
-    # Get currency mode and FX rate for display
     currency_mode = st.session_state.get("currency_mode", "USD")
-    if currency_mode == "CAD":
-        fx_rate = get_usd_cad_rate()
-    else:
-        fx_rate = 1.0
+    fx_rate = get_usd_cad_rate() if currency_mode == "CAD" else 1.0
 
-    # Holdings table with clickable rows
+    symbol_counts: dict[str, int] = {}
     holdings_data = []
-    for symbol in symbols:
-        holding = holdings[symbol]
+    for holding_id in holding_ids:
+        holding = holdings[holding_id]
+        symbol = sanitize_symbol(str(holding.get("symbol", "")))
+        symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
+        symbol_lot_label = f"{symbol} #{symbol_counts[symbol]}"
+
         quantity = safe_number(holding.get("quantity"))
         purchase_price_usd = safe_number(holding.get("purchase_price_usd"))
         purchase_price_cad = safe_number(holding.get("purchase_price_cad"))
 
-        # Determine base purchase price in USD for book cost calculation
         base_purchase_usd = None
         if purchase_price_usd is not None:
             base_purchase_usd = purchase_price_usd
@@ -1946,22 +2007,25 @@ def render_holding_manager() -> str:
         if quantity and base_purchase_usd:
             book_cost = quantity * base_purchase_usd
 
-        holdings_data.append({
-            "symbol": symbol,
-            "quantity": quantity,
-            "purchase_price_usd": purchase_price_usd,
-            "purchase_price_cad": purchase_price_cad,
-            "book_cost": book_cost,
-            "broker": holding.get("broker", "RBC"),
-        })
-    
+        holdings_data.append(
+            {
+                "holding_id": holding_id,
+                "symbol": symbol,
+                "symbol_lot_label": symbol_lot_label,
+                "quantity": quantity,
+                "purchase_price_usd": purchase_price_usd,
+                "purchase_price_cad": purchase_price_cad,
+                "book_cost": book_cost,
+                "broker": holding.get("broker", "RBC"),
+            }
+        )
+
     if not holdings_data:
         st.info("No holdings yet. Add a ticker below.")
     else:
-        # Create clickable table
-        cols = st.columns([1, 1.5, 1.5, 2, 1.5, 1])
+        cols = st.columns([1.2, 1.5, 1.5, 2, 1.5, 1])
         with cols[0]:
-            st.write("**Ticker**")
+            st.write("**Holding**")
         with cols[1]:
             st.write("**Quantity**")
         with cols[2]:
@@ -1972,43 +2036,39 @@ def render_holding_manager() -> str:
             st.write("**Broker**")
         with cols[5]:
             st.write("**Action**")
-        
+
         for holding_data in holdings_data:
-            cols = st.columns([1, 1.5, 1.5, 2, 1.5, 1])
+            cols = st.columns([1.2, 1.5, 1.5, 2, 1.5, 1])
             with cols[0]:
                 if st.button(
-                    holding_data["symbol"],
-                    key=f"select_{holding_data['symbol']}",
-                    use_container_width=True
+                    holding_data["symbol_lot_label"],
+                    key=f"select_{holding_data['holding_id']}",
+                    use_container_width=True,
                 ):
-                    st.session_state.selected_holding = holding_data["symbol"]
+                    st.session_state.selected_holding = holding_data["holding_id"]
                     st.session_state.selected_watchlist_symbol = ""
-                    set_persistent_data_key("selected_holding", holding_data["symbol"])
+                    set_persistent_data_key("selected_holding", holding_data["holding_id"])
                     st.rerun()
             with cols[1]:
                 qty_str = f"{holding_data['quantity']:.4f}" if holding_data["quantity"] else "-"
                 st.write(qty_str)
             with cols[2]:
-                # Display purchase price in selected currency (prefer explicit field)
                 price_str = "-"
                 if currency_mode == "CAD":
                     if holding_data.get("purchase_price_cad") is not None:
-                        price_display = holding_data.get("purchase_price_cad")
-                        price_str = f"${price_display:.2f}"
+                        price_str = f"${holding_data.get('purchase_price_cad'):.2f}"
                     elif holding_data.get("purchase_price_usd") is not None:
                         price_display = holding_data.get("purchase_price_usd") * fx_rate
                         price_str = f"${price_display:.2f}"
                 else:
                     if holding_data.get("purchase_price_usd") is not None:
-                        price_display = holding_data.get("purchase_price_usd")
-                        price_str = f"${price_display:.2f}"
+                        price_str = f"${holding_data.get('purchase_price_usd'):.2f}"
                     elif holding_data.get("purchase_price_cad") is not None and fx_rate and fx_rate > 0:
                         price_display = holding_data.get("purchase_price_cad") / fx_rate
                         price_str = f"${price_display:.2f}"
                 st.write(price_str)
             with cols[3]:
                 if holding_data["book_cost"]:
-                    # book_cost is stored in USD base, convert for display
                     cost_display = holding_data["book_cost"] * fx_rate
                     cost_str = f"${cost_display:.2f}"
                 else:
@@ -2017,26 +2077,25 @@ def render_holding_manager() -> str:
             with cols[4]:
                 st.write(holding_data["broker"])
             with cols[5]:
-                remove_symbol = holding_data["symbol"]
-                if st.button("X", key=f"remove_holding_{remove_symbol}", use_container_width=True):
-                    holdings.pop(remove_symbol, None)
+                remove_id = holding_data["holding_id"]
+                if st.button("X", key=f"remove_holding_{remove_id}", use_container_width=True):
+                    removed_label = holding_data["symbol_lot_label"]
+                    holdings.pop(remove_id, None)
                     if holdings:
-                        if st.session_state.selected_holding == remove_symbol:
+                        if st.session_state.selected_holding == remove_id:
                             st.session_state.selected_holding = sorted(holdings.keys())[0]
                     else:
                         st.session_state.selected_holding = ""
                     set_persistent_data_key("holdings", st.session_state.holdings)
                     set_persistent_data_key("selected_holding", st.session_state.selected_holding)
-                    st.warning(f"Removed {remove_symbol} from holdings.")
+                    st.warning(f"Removed {removed_label} from holdings.")
                     st.rerun()
-    
+
     st.divider()
 
-    # Add / search / watchlist actions
     st.markdown("### Add New Holding")
     new_symbol = st.text_input("Holding Ticker", placeholder="e.g., AAPL or MSFT").strip().upper()
 
-    search_performed = False
     add_to_holding = False
     add_to_watchlist = False
     col1, col2, col3 = st.columns([1, 1, 1])
@@ -2061,15 +2120,14 @@ def render_holding_manager() -> str:
                 add_to_watchlist = True
 
     if add_to_holding:
-        if new_symbol not in holdings:
-            get_holding(new_symbol)
-            st.session_state.selected_holding = new_symbol
-            set_persistent_data_key("selected_holding", new_symbol)
-            set_persistent_data_key("holdings", st.session_state.holdings)
-            st.success(f"✓ Added {new_symbol} to holdings.")
-            st.rerun()
-        else:
-            st.warning(f"{new_symbol} is already in your holdings.")
+        holding_id = create_holding(new_symbol)
+        st.session_state.selected_holding = holding_id
+        st.session_state.selected_watchlist_symbol = ""
+        set_persistent_data_key("selected_holding", holding_id)
+        set_persistent_data_key("holdings", st.session_state.holdings)
+        symbol = get_holding_symbol(holding_id)
+        st.success(f"✓ Added {symbol} as a new holding entry.")
+        st.rerun()
 
     if add_to_watchlist:
         if any(w.get("symbol") == new_symbol for w in st.session_state.watchlist):
@@ -2081,28 +2139,23 @@ def render_holding_manager() -> str:
             st.session_state.selected_watchlist_symbol = new_symbol
             st.rerun()
 
-    # Holding details form
-    selected_symbol = sanitize_symbol(st.session_state.get("selected_holding", ""))
-    if not selected_symbol:
+    selected_holding_id = str(st.session_state.get("selected_holding", "") or "")
+    if not selected_holding_id or selected_holding_id not in holdings:
+        st.caption("Select a holding row above to edit details.")
         return st.session_state.selected_holding
 
-    selected_holding = get_holding(selected_symbol)
+    selected_holding = get_holding(selected_holding_id)
+    selected_symbol = sanitize_symbol(str(selected_holding.get("symbol", "")))
     currency_mode = st.session_state.get("currency_mode", "USD")
-    
-    # Get FX rate for currency conversion
-    if currency_mode == "CAD":
-        fx_rate = get_usd_cad_rate()
-    else:
-        fx_rate = 1.0
-    
+    fx_rate = get_usd_cad_rate() if currency_mode == "CAD" else 1.0
+
     st.markdown("---")
     st.markdown(f"### Edit: {selected_symbol}")
 
-    # Keep purchase currency outside the form so input lock/unlock updates immediately.
     default_purchase_currency = selected_holding.get("purchase_currency", "USD")
     if default_purchase_currency not in ("USD", "CAD"):
         default_purchase_currency = "USD"
-    purchase_currency_key = f"purchase_currency_select_{selected_symbol}"
+    purchase_currency_key = f"purchase_currency_select_{selected_holding_id}"
     if purchase_currency_key not in st.session_state:
         st.session_state[purchase_currency_key] = default_purchase_currency
     purchase_currency = st.selectbox(
@@ -2111,16 +2164,14 @@ def render_holding_manager() -> str:
         key=purchase_currency_key,
         help="Choose the currency you originally purchased in. The other currency is calculated using today's FX rate.",
     )
-    
+
     with st.form("holding-details-form"):
-        # Broker selection
         broker = st.selectbox(
             "Broker",
             options=["RBC", "WealthSimple"],
             index=0 if selected_holding.get("broker", "RBC") == "RBC" else 1,
         )
-        
-        # Quantity (support 4 decimals for fractional trading)
+
         quantity_val = st.number_input(
             "Quantity",
             min_value=0.0,
@@ -2128,8 +2179,7 @@ def render_holding_manager() -> str:
             step=0.0001,
             format="%.4f",
         )
-        
-        # Purchase price in both USD and CAD (allows entering both when purchase FX differed)
+
         stored_usd = selected_holding.get("purchase_price_usd")
         stored_cad = selected_holding.get("purchase_price_cad")
         purchase_fx_rate = get_usd_cad_rate()
@@ -2170,8 +2220,7 @@ def render_holding_manager() -> str:
                 disabled=True,
                 help="Auto-calculated from CAD using today's USD/CAD rate.",
             )
-        
-        # Price levels with currency conversion for display
+
         must_sell_stored = selected_holding.get("must_sell")
         must_sell_display = must_sell_stored * fx_rate if must_sell_stored and fx_rate != 1.0 else must_sell_stored
         must_sell_text = st.text_input(
@@ -2179,35 +2228,31 @@ def render_holding_manager() -> str:
             value="" if must_sell_display is None else f"{must_sell_display:.2f}",
             help="Leave blank to clear.",
         )
-        
+
         reasonable_lower_stored = selected_holding.get("reasonable_lower")
         reasonable_lower_display = reasonable_lower_stored * fx_rate if reasonable_lower_stored and fx_rate != 1.0 else reasonable_lower_stored
         reasonable_lower_text = st.text_input(
             f"Reasonable Lower Limit ({currency_mode})",
-            value=""
-            if reasonable_lower_display is None
-            else f"{reasonable_lower_display:.2f}",
+            value="" if reasonable_lower_display is None else f"{reasonable_lower_display:.2f}",
             help="Leave blank to clear.",
         )
-        
+
         reasonable_upper_stored = selected_holding.get("reasonable_upper")
         reasonable_upper_display = reasonable_upper_stored * fx_rate if reasonable_upper_stored and fx_rate != 1.0 else reasonable_upper_stored
         reasonable_upper_text = st.text_input(
             f"Reasonable Upper Limit ({currency_mode})",
-            value=""
-            if reasonable_upper_display is None
-            else f"{reasonable_upper_display:.2f}",
+            value="" if reasonable_upper_display is None else f"{reasonable_upper_display:.2f}",
             help="Leave blank to clear.",
         )
         save_holding_details = st.form_submit_button("Save holding details", use_container_width=True)
-    
+
     if save_holding_details:
         try:
-            updated = get_holding(selected_symbol)
+            updated = get_holding(selected_holding_id)
+            updated["symbol"] = selected_symbol
             updated["broker"] = broker
             updated["quantity"] = quantity_val if quantity_val > 0 else None
             updated["purchase_currency"] = purchase_currency
-            # Store entered currency and computed counterpart using current FX.
             updated["purchase_price_usd"] = purchase_price_usd_val if purchase_price_usd_val > 0 else None
             updated["purchase_price_cad"] = purchase_price_cad_val if purchase_price_cad_val > 0 else None
             updated["must_sell"] = (parse_optional_price(must_sell_text) / fx_rate) if parse_optional_price(must_sell_text) else None
@@ -2219,15 +2264,14 @@ def render_holding_manager() -> str:
             st.error("One or more values are invalid. Use numeric values like 180.5.")
 
     if len(holdings) > 1 and st.button("Delete selected holding", use_container_width=True):
-        removed = st.session_state.selected_holding
+        removed = selected_holding_id
         holdings.pop(removed, None)
-        st.session_state.selected_holding = sorted(holdings.keys())[0]
+        st.session_state.selected_holding = ""
         set_persistent_data_key("holdings", st.session_state.holdings)
         set_persistent_data_key("selected_holding", st.session_state.selected_holding)
-        st.warning(f"Removed {removed} from holdings.")
+        st.warning("Removed selected holding entry.")
         st.rerun()
 
-    # Return selected symbol
     return st.session_state.selected_holding
 
 
@@ -2799,7 +2843,9 @@ def main() -> None:
 
     # Determine is_watchlist_selected based on session state
     is_watchlist_selected = bool(st.session_state.get("selected_watchlist_symbol"))
-    symbol = st.session_state.get("selected_watchlist_symbol") or st.session_state.selected_holding
+    selected_holding_id = str(st.session_state.get("selected_holding", "") or "")
+    selected_holding_symbol = get_holding_symbol(selected_holding_id)
+    symbol = st.session_state.get("selected_watchlist_symbol") or selected_holding_symbol
     allow_insecure_ssl = st.session_state.get("allow_insecure_ssl", False)
 
     # Determine time range (default stored in session; selector shown near the chart)
@@ -3019,7 +3065,7 @@ def main() -> None:
         display_currency = st.session_state.get("currency_mode", "USD")
         st.caption(f"Displayed in {display_currency}")
 
-    selected_holding = get_holding(symbol)
+    selected_holding = get_holding(selected_holding_id)
     live_quote_price, live_quote_note = get_live_quote_for_range(
         symbol,
         range_label,
