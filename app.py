@@ -1456,6 +1456,7 @@ def build_price_chart(
 ) -> go.Figure:
     # Get currency mode for chart title
     currency_mode = st.session_state.get("currency_mode", "USD")
+    chart_fx_rate = get_usd_cad_rate() if currency_mode == "CAD" else 1.0
     
     figure = make_subplots(
         rows=2,
@@ -1498,7 +1499,7 @@ def build_price_chart(
         legend={"orientation": "h", "y": 1.02, "x": 1, "xanchor": "right", "yanchor": "bottom"},
     )
 
-    must_sell = safe_number(holding.get("must_sell"))
+    must_sell_usd = safe_number(holding.get("must_sell"))
     # Prefer USD purchase price; fall back to CAD converted to USD using current FX
     purchase_price_usd = safe_number(holding.get("purchase_price_usd"))
     if purchase_price_usd is None:
@@ -1507,8 +1508,13 @@ def build_price_chart(
             fx = get_usd_cad_rate()
             # convert CAD -> USD
             purchase_price_usd = purchase_price_cad / fx if fx and fx > 0 else purchase_price_cad
-    reasonable_lower = safe_number(holding.get("reasonable_lower"))
-    reasonable_upper = safe_number(holding.get("reasonable_upper"))
+    reasonable_lower_usd = safe_number(holding.get("reasonable_lower"))
+    reasonable_upper_usd = safe_number(holding.get("reasonable_upper"))
+
+    must_sell = must_sell_usd * chart_fx_rate if must_sell_usd is not None else None
+    purchase_price = purchase_price_usd * chart_fx_rate if purchase_price_usd is not None else None
+    reasonable_lower = reasonable_lower_usd * chart_fx_rate if reasonable_lower_usd is not None else None
+    reasonable_upper = reasonable_upper_usd * chart_fx_rate if reasonable_upper_usd is not None else None
 
     if must_sell is not None:
         figure.add_hline(
@@ -1525,7 +1531,7 @@ def build_price_chart(
             xanchor="left",
             yref="y1",
             y=must_sell,
-            text=f"Must-Sell: ${must_sell:.2f}",
+            text=f"Must-Sell: ${must_sell:.2f} {currency_mode}",
             showarrow=False,
             bgcolor="#fff176",
             bordercolor="#b22222",
@@ -1533,9 +1539,9 @@ def build_price_chart(
             font={"size": 12, "color": "#000000"},
         )
 
-    if purchase_price_usd is not None:
+    if purchase_price is not None:
         figure.add_hline(
-            y=purchase_price_usd,
+            y=purchase_price,
             line_width=2,
             line_dash="dot",
             line_color="#1f6f43",
@@ -1547,8 +1553,8 @@ def build_price_chart(
             x=0.01,
             xanchor="left",
             yref="y1",
-            y=purchase_price_usd,
-            text=f"Purchase Price: ${purchase_price_usd:.2f}",
+            y=purchase_price,
+            text=f"Purchase Price: ${purchase_price:.2f} {currency_mode}",
             showarrow=False,
             bgcolor="#fff176",
             bordercolor="#1f6f43",
@@ -1574,7 +1580,7 @@ def build_price_chart(
             xanchor="right",
             yref="y1",
             y=mid,
-            text=f"Reasonable Range: ${lower:.2f} - ${upper:.2f}",
+            text=f"Reasonable Range: ${lower:.2f} - ${upper:.2f} {currency_mode}",
             showarrow=False,
             bgcolor="#fff176",
             bordercolor="#0d6efd",
