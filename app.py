@@ -1458,6 +1458,7 @@ def build_price_chart(
     # Get currency mode for chart title
     currency_mode = st.session_state.get("currency_mode", "USD")
     chart_fx_rate = get_usd_cad_rate()
+    overlay_fx_rate = chart_fx_rate if currency_mode == "CAD" else 1.0
 
     display_history = history.copy()
     normalized_stock_currency = str(stock_currency or "USD").upper()
@@ -1524,10 +1525,10 @@ def build_price_chart(
     reasonable_lower_usd = safe_number(holding.get("reasonable_lower"))
     reasonable_upper_usd = safe_number(holding.get("reasonable_upper"))
 
-    must_sell = must_sell_usd * chart_fx_rate if must_sell_usd is not None else None
-    purchase_price = purchase_price_usd * chart_fx_rate if purchase_price_usd is not None else None
-    reasonable_lower = reasonable_lower_usd * chart_fx_rate if reasonable_lower_usd is not None else None
-    reasonable_upper = reasonable_upper_usd * chart_fx_rate if reasonable_upper_usd is not None else None
+    must_sell = must_sell_usd * overlay_fx_rate if must_sell_usd is not None else None
+    purchase_price = purchase_price_usd * overlay_fx_rate if purchase_price_usd is not None else None
+    reasonable_lower = reasonable_lower_usd * overlay_fx_rate if reasonable_lower_usd is not None else None
+    reasonable_upper = reasonable_upper_usd * overlay_fx_rate if reasonable_upper_usd is not None else None
 
     if must_sell is not None:
         figure.add_hline(
