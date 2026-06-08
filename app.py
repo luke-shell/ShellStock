@@ -1545,7 +1545,9 @@ def render_metric_cards(info: dict[str, Any], history: pd.DataFrame, holding: di
     stock_currency = detect_stock_currency_from_yahoo_info(info)
 
     # Always compute estimated sale values in CAD using today's FX.
-    sale_fx_rate = get_usd_cad_rate()
+    sale_fx_info = get_usd_cad_rate_info()
+    sale_fx_rate = float(sale_fx_info.get("rate", 1.35))
+    sale_fx_timestamp = sale_fx_info.get("timestamp", "N/A")
 
     # Calculate estimated sale price (pass stock currency to pick correct flat-fee currency)
     sale_data = calculate_estimated_sale_price(
@@ -1634,6 +1636,7 @@ def render_metric_cards(info: dict[str, Any], history: pd.DataFrame, holding: di
     if quantity is not None and current_price is not None:
         st.markdown("---")
         st.subheader("Estimated Sale Price (CAD)")
+        st.caption(f"USD/CAD used: {sale_fx_rate:.4f} (as of {sale_fx_timestamp})")
         
         sale_col1, sale_col2, sale_col3 = st.columns(3)
         
@@ -2072,6 +2075,20 @@ def render_holding_manager() -> str:
     
     st.markdown("---")
     st.markdown(f"### Edit: {selected_symbol}")
+
+    # Keep purchase currency outside the form so input lock/unlock updates immediately.
+    default_purchase_currency = selected_holding.get("purchase_currency", "USD")
+    if default_purchase_currency not in ("USD", "CAD"):
+        default_purchase_currency = "USD"
+    purchase_currency_key = f"purchase_currency_select_{selected_symbol}"
+    if purchase_currency_key not in st.session_state:
+        st.session_state[purchase_currency_key] = default_purchase_currency
+    purchase_currency = st.selectbox(
+        "Purchase Currency",
+        options=["USD", "CAD"],
+        key=purchase_currency_key,
+        help="Choose the currency you originally purchased in. The other currency is calculated using today's FX rate.",
+    )
     
     with st.form("holding-details-form"):
         # Broker selection
@@ -2093,19 +2110,9 @@ def render_holding_manager() -> str:
         # Purchase price in both USD and CAD (allows entering both when purchase FX differed)
         stored_usd = selected_holding.get("purchase_price_usd")
         stored_cad = selected_holding.get("purchase_price_cad")
-        purchase_currency = selected_holding.get("purchase_currency", "USD")
-        if purchase_currency not in ("USD", "CAD"):
-            purchase_currency = "USD"
-
-        purchase_currency = st.selectbox(
-            "Purchase Currency",
-            options=["USD", "CAD"],
-            index=0 if purchase_currency == "USD" else 1,
-            help="Choose the currency you originally purchased in. The other currency is calculated using today's FX rate.",
-        )
-
-        purchase_price_usd_default = stored_usd if stored_usd is not None else (stored_cad / fx_rate if stored_cad is not None and fx_rate and fx_rate > 0 else 0.0)
-        purchase_price_cad_default = stored_cad if stored_cad is not None else (stored_usd * fx_rate if stored_usd is not None else 0.0)
+        purchase_fx_rate = get_usd_cad_rate()
+        purchase_price_usd_default = stored_usd if stored_usd is not None else (stored_cad / purchase_fx_rate if stored_cad is not None and purchase_fx_rate and purchase_fx_rate > 0 else 0.0)
+        purchase_price_cad_default = stored_cad if stored_cad is not None else (stored_usd * purchase_fx_rate if stored_usd is not None else 0.0)
 
         if purchase_currency == "USD":
             purchase_price_usd_val = st.number_input(
@@ -2115,7 +2122,7 @@ def render_holding_manager() -> str:
                 step=0.01,
                 help="Editable purchase price in USD.",
             )
-            computed_cad = purchase_price_usd_val * fx_rate if purchase_price_usd_val > 0 else 0.0
+            computed_cad = purchase_price_usd_val * purchase_fx_rate if purchase_price_usd_val > 0 else 0.0
             purchase_price_cad_val = st.number_input(
                 "Purchase Price (CAD, auto)",
                 min_value=0.0,
@@ -2132,7 +2139,7 @@ def render_holding_manager() -> str:
                 step=0.01,
                 help="Editable purchase price in CAD.",
             )
-            computed_usd = (purchase_price_cad_val / fx_rate) if (purchase_price_cad_val > 0 and fx_rate and fx_rate > 0) else 0.0
+            computed_usd = (purchase_price_cad_val / purchase_fx_rate) if (purchase_price_cad_val > 0 and purchase_fx_rate and purchase_fx_rate > 0) else 0.0
             purchase_price_usd_val = st.number_input(
                 "Purchase Price (USD, auto)",
                 min_value=0.0,
