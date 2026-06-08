@@ -68,6 +68,8 @@ RANGE_FETCH_TTL_SECONDS = {
     "10 Years": 5400,
 }
 
+EASTERN_TZ = pytz.timezone("US/Eastern")
+
 
 def get_range_fetch_ttl_seconds(range_label: str) -> int:
     return int(RANGE_FETCH_TTL_SECONDS.get(range_label, SYMBOL_FETCH_COOLDOWN_SECONDS))
@@ -726,9 +728,28 @@ def safe_number(value: Any) -> float | None:
     return None
 
 
+def format_timestamp_et(value: Any, include_seconds: bool = False) -> str:
+    """Format timestamps in US/Eastern so UI time labels are consistent."""
+    fmt = "%Y-%m-%d %H:%M:%S %Z" if include_seconds else "%Y-%m-%d %H:%M %Z"
+    try:
+        ts = pd.to_datetime(value, errors="coerce")
+    except Exception:
+        ts = pd.NaT
+
+    if pd.isna(ts):
+        return datetime.now(EASTERN_TZ).strftime(fmt)
+
+    try:
+        if getattr(ts, "tzinfo", None) is None:
+            return ts.strftime(fmt)
+        return ts.tz_convert(EASTERN_TZ).strftime(fmt)
+    except Exception:
+        return datetime.now(EASTERN_TZ).strftime(fmt)
+
+
 def get_current_time_display() -> str:
     """Get current time in Eastern and PST timezones."""
-    eastern = pytz.timezone('US/Eastern')
+    eastern = EASTERN_TZ
     pacific = pytz.timezone('US/Pacific')
     
     now_eastern = datetime.now(eastern)
@@ -757,11 +778,7 @@ def get_usd_cad_rate_info() -> dict:
         if hist is not None and not hist.empty:
             last_idx = hist.index[-1]
             last_close = float(hist.iloc[-1]["Close"])
-            # Format timestamp
-            try:
-                ts_str = last_idx.strftime("%Y-%m-%d %H:%M %Z") if hasattr(last_idx, "tz") and last_idx.tz is not None else last_idx.strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                ts_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            ts_str = format_timestamp_et(last_idx)
             result = {"rate": last_close, "timestamp": ts_str}
             set_persistent_data_key("last_fx_info", result)
             return result
@@ -770,7 +787,7 @@ def get_usd_cad_rate_info() -> dict:
         info = ticker.info or {}
         current_rate = info.get("currentPrice") or info.get("regularMarketPrice")
         if current_rate:
-            result = {"rate": float(current_rate), "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")}
+            result = {"rate": float(current_rate), "timestamp": format_timestamp_et(datetime.now(EASTERN_TZ))}
             set_persistent_data_key("last_fx_info", result)
             return result
     except Exception:
@@ -779,6 +796,9 @@ def get_usd_cad_rate_info() -> dict:
     # Fallback to last successful FX quote if Yahoo is rate-limited/unavailable.
     cached_fx = get_persistent_data_key("last_fx_info", None)
     if isinstance(cached_fx, dict) and "rate" in cached_fx:
+        cached_ts = cached_fx.get("timestamp")
+        if cached_ts:
+            cached_fx["timestamp"] = format_timestamp_et(cached_ts)
         return cached_fx
 
     return {"rate": 1.35, "timestamp": "N/A"}
@@ -1163,7 +1183,7 @@ def load_stock_quote(
     ticker = yf.Ticker(symbol, session=session)
 
     price = None
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = format_timestamp_et(datetime.now(EASTERN_TZ), include_seconds=True)
 
     try:
         fast_info = ticker.fast_info or {}
@@ -1178,14 +1198,7 @@ def load_stock_quote(
         if hist is not None and not hist.empty:
             price = float(hist.iloc[-1]["Close"])
             last_idx = hist.index[-1]
-            try:
-                timestamp = (
-                    last_idx.strftime("%Y-%m-%d %H:%M %Z")
-                    if hasattr(last_idx, "tz") and last_idx.tz is not None
-                    else last_idx.strftime("%Y-%m-%d %H:%M")
-                )
-            except Exception:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = format_timestamp_et(last_idx, include_seconds=True)
 
     if price is None:
         info = ticker.info or {}
@@ -3077,11 +3090,8 @@ def main() -> None:
                 st.warning(f"Unable to load news: {error}")
 
     last_timestamp = history.iloc[-1][history.columns[0]]
-    if isinstance(last_timestamp, datetime):
-        last_updated = last_timestamp.strftime("%Y-%m-%d %H:%M")
-    else:
-        last_updated = str(last_timestamp)
-    st.caption(f"Latest candle in chart: {last_updated}")
+    last_updated = format_timestamp_et(last_timestamp)
+    st.caption(f"Latest candle in chart (ET): {last_updated}")
 
 
 if __name__ == "__main__":
