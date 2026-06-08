@@ -1453,10 +1453,23 @@ def build_price_chart(
     symbol: str,
     range_label: str,
     holding: dict[str, float | None],
+    stock_currency: str = "USD",
 ) -> go.Figure:
     # Get currency mode for chart title
     currency_mode = st.session_state.get("currency_mode", "USD")
     chart_fx_rate = get_usd_cad_rate() if currency_mode == "CAD" else 1.0
+
+    display_history = history.copy()
+    normalized_stock_currency = str(stock_currency or "USD").upper()
+    if normalized_stock_currency not in ("USD", "CAD"):
+        normalized_stock_currency = "USD"
+
+    # Convert candle prices into selected display currency before plotting.
+    if normalized_stock_currency != currency_mode:
+        conversion_factor = chart_fx_rate if currency_mode == "CAD" else (1.0 / chart_fx_rate if chart_fx_rate > 0 else 1.0)
+        for col in ("Open", "High", "Low", "Close"):
+            if col in display_history.columns:
+                display_history[col] = pd.to_numeric(display_history[col], errors="coerce") * conversion_factor
     
     figure = make_subplots(
         rows=2,
@@ -1466,14 +1479,14 @@ def build_price_chart(
         row_heights=[0.75, 0.25],
     )
 
-    x_axis = history[history.columns[0]]
+    x_axis = display_history[display_history.columns[0]]
     figure.add_trace(
         go.Candlestick(
             x=x_axis,
-            open=history["Open"],
-            high=history["High"],
-            low=history["Low"],
-            close=history["Close"],
+            open=display_history["Open"],
+            high=display_history["High"],
+            low=display_history["Low"],
+            close=display_history["Close"],
             name="Price",
         ),
         row=1,
@@ -1482,7 +1495,7 @@ def build_price_chart(
     figure.add_trace(
         go.Bar(
             x=x_axis,
-            y=history["Volume"],
+            y=display_history["Volume"],
             name="Volume",
             marker_color="#5b8def",
             opacity=0.6,
@@ -2971,7 +2984,17 @@ def main() -> None:
 
             # Show chart
             preview_holding = {"broker": "RBC", "quantity": None, "purchase_price_usd": None, "purchase_price_cad": None, "must_sell": None, "reasonable_lower": None, "reasonable_upper": None}
-            st.plotly_chart(build_price_chart(history, symbol, range_label, preview_holding), use_container_width=True)
+            watch_stock_currency = detect_stock_currency_from_yahoo_info(info)
+            st.plotly_chart(
+                build_price_chart(
+                    history,
+                    symbol,
+                    range_label,
+                    preview_holding,
+                    stock_currency=watch_stock_currency,
+                ),
+                use_container_width=True,
+            )
 
             # Show tabs
             summary_tab, fundamentals_tab, alerts_tab, news_tab = st.tabs(["Summary", "Fundamentals", "Alerts", "News"])
@@ -3156,7 +3179,17 @@ def main() -> None:
             st.rerun()
 
     # Display chart first
-    st.plotly_chart(build_price_chart(history, symbol, range_label, selected_holding), use_container_width=True)
+    holding_stock_currency = detect_stock_currency_from_yahoo_info(info)
+    st.plotly_chart(
+        build_price_chart(
+            history,
+            symbol,
+            range_label,
+            selected_holding,
+            stock_currency=holding_stock_currency,
+        ),
+        use_container_width=True,
+    )
     
     # Display metrics below chart
     render_metric_cards(info, history, selected_holding, current_price)
