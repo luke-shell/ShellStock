@@ -1613,7 +1613,7 @@ def render_metric_cards(info: dict[str, Any], history: pd.DataFrame, holding: di
         st.metric("Div. Yield", format_percent(pick_value(info, "dividendYield")))
     
     # Today's Return and Total Return section
-    if today_return_pct is not None or total_return_pct is not None:
+    if current_price is not None and quantity is not None:
         st.markdown("---")
         st.subheader("Your Returns")
         
@@ -1644,6 +1644,15 @@ def render_metric_cards(info: dict[str, Any], history: pd.DataFrame, holding: di
                     delta=delta_text,
                     delta_color="off"
                 )
+
+        # Show absolute current market value in both currencies side-by-side.
+        market_value_usd = current_price * quantity
+        market_value_cad = market_value_usd * sale_fx_rate
+        mv_col1, mv_col2 = st.columns(2)
+        with mv_col1:
+            st.metric("Market Value (USD)", f"${market_value_usd:.2f} USD")
+        with mv_col2:
+            st.metric("Market Value (CAD)", f"${market_value_cad:.2f} CAD")
     
     # Estimated sale price section
     if quantity is not None and current_price is not None:
