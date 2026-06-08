@@ -755,6 +755,9 @@ def initialize_state() -> None:
     if "auto_refresh_until" not in st.session_state:
         st.session_state.auto_refresh_until = None
 
+    if "show_holding_editor" not in st.session_state:
+        st.session_state.show_holding_editor = False
+
 
 def safe_number(value: Any) -> float | None:
     if value is None:
@@ -2076,6 +2079,7 @@ def render_holding_manager() -> str:
                     use_container_width=True,
                 ):
                     st.session_state.selected_holding = holding_data["holding_id"]
+                    st.session_state.show_holding_editor = True
                     st.session_state.selected_watchlist_symbol = ""
                     set_persistent_data_key("selected_holding", holding_data["holding_id"])
                     st.rerun()
@@ -2121,6 +2125,7 @@ def render_holding_manager() -> str:
                     st.warning(f"Removed {removed_label} from holdings.")
                     st.rerun()
 
+
     st.divider()
 
     st.markdown("### Add New Holding")
@@ -2152,6 +2157,7 @@ def render_holding_manager() -> str:
     if add_to_holding:
         holding_id = create_holding(new_symbol)
         st.session_state.selected_holding = holding_id
+        st.session_state.show_holding_editor = True
         st.session_state.selected_watchlist_symbol = ""
         set_persistent_data_key("selected_holding", holding_id)
         set_persistent_data_key("holdings", st.session_state.holdings)
@@ -2170,7 +2176,8 @@ def render_holding_manager() -> str:
             st.rerun()
 
     selected_holding_id = str(st.session_state.get("selected_holding", "") or "")
-    if not selected_holding_id or selected_holding_id not in holdings:
+    show_holding_editor = bool(st.session_state.get("show_holding_editor", False))
+    if not selected_holding_id or selected_holding_id not in holdings or not show_holding_editor:
         st.caption("Select a holding row above to edit details.")
         return st.session_state.selected_holding
 
@@ -2289,18 +2296,11 @@ def render_holding_manager() -> str:
             updated["reasonable_lower"] = (parse_optional_price(reasonable_lower_text) / fx_rate) if parse_optional_price(reasonable_lower_text) else None
             updated["reasonable_upper"] = (parse_optional_price(reasonable_upper_text) / fx_rate) if parse_optional_price(reasonable_upper_text) else None
             set_persistent_data_key("holdings", st.session_state.holdings)
+            st.session_state.show_holding_editor = False
             st.success("✓ Holding details saved.")
+            st.rerun()
         except ValueError:
             st.error("One or more values are invalid. Use numeric values like 180.5.")
-
-    if len(holdings) > 1 and st.button("Delete selected holding", use_container_width=True):
-        removed = selected_holding_id
-        holdings.pop(removed, None)
-        st.session_state.selected_holding = ""
-        set_persistent_data_key("holdings", st.session_state.holdings)
-        set_persistent_data_key("selected_holding", st.session_state.selected_holding)
-        st.warning("Removed selected holding entry.")
-        st.rerun()
 
     return st.session_state.selected_holding
 
