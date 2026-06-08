@@ -985,6 +985,22 @@ def sanitize_symbol(value: str) -> str:
     return value.strip().upper()
 
 
+def apply_market_to_symbol(symbol: str, market: str) -> str:
+    normalized = sanitize_symbol(symbol)
+    if not normalized:
+        return ""
+
+    # Keep explicit Yahoo symbols untouched (e.g., RY.TO, CAD=X).
+    if "." in normalized or "=" in normalized:
+        return normalized
+
+    if market == "Canada (TSX)":
+        return f"{normalized}.TO"
+    if market == "Canada Venture (TSXV)":
+        return f"{normalized}.V"
+    return normalized
+
+
 def _default_holding(symbol: str) -> dict[str, Any]:
     return {
         "symbol": sanitize_symbol(symbol),
@@ -2130,14 +2146,21 @@ def render_holding_manager() -> str:
 
     st.markdown("### Add New Holding")
     new_symbol = st.text_input("Holding Ticker", placeholder="e.g., AAPL or MSFT").strip().upper()
+    new_symbol_market = st.selectbox(
+        "Market",
+        options=["US", "Canada (TSX)", "Canada Venture (TSXV)"],
+        index=0,
+        help="Pick the market so ShellStock can use the correct Yahoo ticker format.",
+    )
+    market_symbol = apply_market_to_symbol(new_symbol, new_symbol_market)
 
     add_to_holding = False
     add_to_watchlist = False
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
         if st.button("Search", use_container_width=True, key="search_btn"):
-            if new_symbol:
-                st.session_state.selected_watchlist_symbol = new_symbol
+            if market_symbol:
+                st.session_state.selected_watchlist_symbol = market_symbol
                 st.rerun()
             else:
                 st.warning("Please enter a ticker symbol.")
@@ -2155,7 +2178,7 @@ def render_holding_manager() -> str:
                 add_to_watchlist = True
 
     if add_to_holding:
-        holding_id = create_holding(new_symbol)
+        holding_id = create_holding(market_symbol)
         st.session_state.selected_holding = holding_id
         st.session_state.show_holding_editor = True
         st.session_state.selected_watchlist_symbol = ""
@@ -2166,13 +2189,13 @@ def render_holding_manager() -> str:
         st.rerun()
 
     if add_to_watchlist:
-        if any(w.get("symbol") == new_symbol for w in st.session_state.watchlist):
-            st.info(f"{new_symbol} is already in your watchlist.")
+        if any(w.get("symbol") == market_symbol for w in st.session_state.watchlist):
+            st.info(f"{market_symbol} is already in your watchlist.")
         else:
-            st.session_state.watchlist.append({"symbol": new_symbol, "note": ""})
+            st.session_state.watchlist.append({"symbol": market_symbol, "note": ""})
             set_persistent_data_key("watchlist", st.session_state.watchlist)
-            st.success(f"✓ Added {new_symbol} to watchlist.")
-            st.session_state.selected_watchlist_symbol = new_symbol
+            st.success(f"✓ Added {market_symbol} to watchlist.")
+            st.session_state.selected_watchlist_symbol = market_symbol
             st.rerun()
 
     selected_holding_id = str(st.session_state.get("selected_holding", "") or "")
