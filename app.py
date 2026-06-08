@@ -648,6 +648,11 @@ def initialize_state() -> None:
                     # Ensure both keys exist
                     h.setdefault("purchase_price_usd", None)
                     h.setdefault("purchase_price_cad", None)
+                    if "purchase_currency" not in h:
+                        if h.get("purchase_price_cad") is not None and h.get("purchase_price_usd") is None:
+                            h["purchase_currency"] = "CAD"
+                        else:
+                            h["purchase_currency"] = "USD"
         st.session_state.holdings = persisted_holdings
     
     if "selected_holding" not in st.session_state:
@@ -938,6 +943,7 @@ def get_holding(symbol: str) -> dict[str, float | None]:
             "must_sell": None,
             "purchase_price_usd": None,
             "purchase_price_cad": None,
+            "purchase_currency": "USD",
             "reasonable_lower": None,
             "reasonable_upper": None,
             "broker": "RBC",
@@ -1538,13 +1544,16 @@ def render_metric_cards(info: dict[str, Any], history: pd.DataFrame, holding: di
 
     stock_currency = detect_stock_currency_from_yahoo_info(info)
 
+    # Always compute estimated sale values in CAD using today's FX.
+    sale_fx_rate = get_usd_cad_rate()
+
     # Calculate estimated sale price (pass stock currency to pick correct flat-fee currency)
     sale_data = calculate_estimated_sale_price(
         current_price,
         quantity,
         broker,
-        fx_rate=fx_rate,
-        display_currency=currency_mode,
+        fx_rate=sale_fx_rate,
+        display_currency="CAD",
         stock_currency=stock_currency,
     )
     
@@ -1624,15 +1633,15 @@ def render_metric_cards(info: dict[str, Any], history: pd.DataFrame, holding: di
     # Estimated sale price section
     if quantity is not None and current_price is not None:
         st.markdown("---")
-        st.subheader("Estimated Sale Price")
+        st.subheader("Estimated Sale Price (CAD)")
         
         sale_col1, sale_col2, sale_col3 = st.columns(3)
         
         with sale_col1:
-            current_val = sale_data["current_total"] * fx_rate if sale_data["current_total"] else 0
+            current_val = sale_data["current_total"] * sale_fx_rate if sale_data["current_total"] else 0
             st.metric(
                 "Position Value",
-                f"${current_val:.2f}" if sale_data["current_total"] else "N/A"
+                f"${current_val:.2f} CAD" if sale_data["current_total"] else "N/A"
             )
         with sale_col2:
             broker_name = "WealthSimple" if broker == "WealthSimple" else "RBC"
@@ -1642,33 +1651,24 @@ def render_metric_cards(info: dict[str, Any], history: pd.DataFrame, holding: di
             if fee_type == "percent":
                 fee_percent = sale_data.get("fee_percent") or 0
                 fee_text = f"{broker_name} Fee ({fee_percent*100:.2f}%)"
-                fee_val = sale_data.get("fee_amount", 0) * fx_rate if sale_data.get("fee_amount") else 0
+                fee_val = sale_data.get("fee_amount", 0) * sale_fx_rate if sale_data.get("fee_amount") else 0
             else:
                 # Flat fee
                 fee_currency = sale_data.get("fee_currency", "USD")
                 fee_value = sale_data.get("fee_value", 0)
-                if currency_mode == "CAD":
-                    if fee_currency == "CAD":
-                        fee_text = f"{broker_name} Fee ({format_currency(fee_value, 'CAD')})"
-                        fee_val = fee_value
-                    else:
-                        fee_text = f"{broker_name} Fee ({format_currency(sale_data.get('fee_amount',0)*fx_rate, 'CAD')})"
-                        fee_val = sale_data.get("fee_amount", 0) * fx_rate
+                if fee_currency == "CAD":
+                    fee_text = f"{broker_name} Fee ({format_currency(fee_value, 'CAD')})"
+                    fee_val = fee_value
                 else:
-                    # display USD
-                    if fee_currency == "CAD":
-                        fee_text = f"{broker_name} Fee ({format_currency(sale_data.get('fee_amount',0), 'USD')})"
-                        fee_val = sale_data.get("fee_amount", 0)
-                    else:
-                        fee_text = f"{broker_name} Fee ({format_currency(fee_value, 'USD')})"
-                        fee_val = fee_value
+                    fee_text = f"{broker_name} Fee ({format_currency(fee_value * sale_fx_rate, 'CAD')})"
+                    fee_val = fee_value * sale_fx_rate
 
-            st.metric(fee_text, f"${fee_val:.2f}" if fee_val else "N/A")
+            st.metric(fee_text, f"${fee_val:.2f} CAD" if fee_val else "N/A")
         with sale_col3:
-            proceeds_val = sale_data["estimated_proceeds"] * fx_rate if sale_data["estimated_proceeds"] else 0
+            proceeds_val = sale_data["estimated_proceeds"] * sale_fx_rate if sale_data["estimated_proceeds"] else 0
             st.metric(
                 "Proceeds (After Fee)",
-                f"${proceeds_val:.2f}" if sale_data["estimated_proceeds"] else "N/A"
+                f"${proceeds_val:.2f} CAD" if sale_data["estimated_proceeds"] else "N/A"
             )
         
         # Fee reference links
@@ -2093,25 +2093,54 @@ def render_holding_manager() -> str:
         # Purchase price in both USD and CAD (allows entering both when purchase FX differed)
         stored_usd = selected_holding.get("purchase_price_usd")
         stored_cad = selected_holding.get("purchase_price_cad")
+        purchase_currency = selected_holding.get("purchase_currency", "USD")
+        if purchase_currency not in ("USD", "CAD"):
+            purchase_currency = "USD"
+
+        purchase_currency = st.selectbox(
+            "Purchase Currency",
+            options=["USD", "CAD"],
+            index=0 if purchase_currency == "USD" else 1,
+            help="Choose the currency you originally purchased in. The other currency is calculated using today's FX rate.",
+        )
 
         purchase_price_usd_default = stored_usd if stored_usd is not None else (stored_cad / fx_rate if stored_cad is not None and fx_rate and fx_rate > 0 else 0.0)
         purchase_price_cad_default = stored_cad if stored_cad is not None else (stored_usd * fx_rate if stored_usd is not None else 0.0)
 
-        purchase_price_usd_val = st.number_input(
-            "Purchase Price (USD)",
-            min_value=0.0,
-            value=float(purchase_price_usd_default),
-            step=0.01,
-            help="Enter the purchase price in USD (if known).",
-        )
-
-        purchase_price_cad_val = st.number_input(
-            "Purchase Price (CAD)",
-            min_value=0.0,
-            value=float(purchase_price_cad_default),
-            step=0.01,
-            help="Enter the purchase price in CAD (if known).",
-        )
+        if purchase_currency == "USD":
+            purchase_price_usd_val = st.number_input(
+                "Purchase Price (USD)",
+                min_value=0.0,
+                value=float(purchase_price_usd_default),
+                step=0.01,
+                help="Editable purchase price in USD.",
+            )
+            computed_cad = purchase_price_usd_val * fx_rate if purchase_price_usd_val > 0 else 0.0
+            purchase_price_cad_val = st.number_input(
+                "Purchase Price (CAD, auto)",
+                min_value=0.0,
+                value=float(computed_cad),
+                step=0.01,
+                disabled=True,
+                help="Auto-calculated from USD using today's USD/CAD rate.",
+            )
+        else:
+            purchase_price_cad_val = st.number_input(
+                "Purchase Price (CAD)",
+                min_value=0.0,
+                value=float(purchase_price_cad_default),
+                step=0.01,
+                help="Editable purchase price in CAD.",
+            )
+            computed_usd = (purchase_price_cad_val / fx_rate) if (purchase_price_cad_val > 0 and fx_rate and fx_rate > 0) else 0.0
+            purchase_price_usd_val = st.number_input(
+                "Purchase Price (USD, auto)",
+                min_value=0.0,
+                value=float(computed_usd),
+                step=0.01,
+                disabled=True,
+                help="Auto-calculated from CAD using today's USD/CAD rate.",
+            )
         
         # Price levels with currency conversion for display
         must_sell_stored = selected_holding.get("must_sell")
@@ -2148,7 +2177,8 @@ def render_holding_manager() -> str:
             updated = get_holding(selected_symbol)
             updated["broker"] = broker
             updated["quantity"] = quantity_val if quantity_val > 0 else None
-            # Store both USD and CAD purchase prices (allow user to specify both)
+            updated["purchase_currency"] = purchase_currency
+            # Store entered currency and computed counterpart using current FX.
             updated["purchase_price_usd"] = purchase_price_usd_val if purchase_price_usd_val > 0 else None
             updated["purchase_price_cad"] = purchase_price_cad_val if purchase_price_cad_val > 0 else None
             updated["must_sell"] = (parse_optional_price(must_sell_text) / fx_rate) if parse_optional_price(must_sell_text) else None
