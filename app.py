@@ -2006,13 +2006,22 @@ def render_holding_manager() -> str:
     currency_mode = st.session_state.get("currency_mode", "USD")
     fx_rate = get_usd_cad_rate() if currency_mode == "CAD" else 1.0
 
+    symbol_totals: dict[str, int] = {}
+    for holding_id in holding_ids:
+        symbol = sanitize_symbol(str(holdings.get(holding_id, {}).get("symbol", "")))
+        if symbol:
+            symbol_totals[symbol] = symbol_totals.get(symbol, 0) + 1
+
     symbol_counts: dict[str, int] = {}
     holdings_data = []
     for holding_id in holding_ids:
         holding = holdings[holding_id]
         symbol = sanitize_symbol(str(holding.get("symbol", "")))
         symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
-        symbol_lot_label = f"{symbol} #{symbol_counts[symbol]}"
+        if symbol_totals.get(symbol, 0) > 1:
+            symbol_lot_label = f"{symbol} #{symbol_counts[symbol]}"
+        else:
+            symbol_lot_label = symbol
 
         quantity = safe_number(holding.get("quantity"))
         purchase_price_usd = safe_number(holding.get("purchase_price_usd"))
