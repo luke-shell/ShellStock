@@ -1457,7 +1457,7 @@ def build_price_chart(
 ) -> go.Figure:
     # Get currency mode for chart title
     currency_mode = st.session_state.get("currency_mode", "USD")
-    chart_fx_rate = get_usd_cad_rate() if currency_mode == "CAD" else 1.0
+    chart_fx_rate = get_usd_cad_rate()
 
     display_history = history.copy()
     normalized_stock_currency = str(stock_currency or "USD").upper()
