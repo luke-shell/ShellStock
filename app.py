@@ -639,9 +639,12 @@ def initialize_state() -> None:
                     continue
 
                 holding = dict(raw_holding)
-                symbol_from_value = sanitize_symbol(str(holding.get("symbol", "")))
-                symbol_from_key = sanitize_symbol(str(raw_key))
-                normalized_symbol = symbol_from_value or symbol_from_key
+                symbol_from_value = _symbol_from_holding_key(holding.get("symbol", ""))
+                symbol_from_key = _symbol_from_holding_key(raw_key)
+                if symbol_from_value and _looks_like_ticker_symbol(symbol_from_value):
+                    normalized_symbol = symbol_from_value
+                else:
+                    normalized_symbol = symbol_from_key
                 if not normalized_symbol:
                     continue
 
@@ -664,9 +667,14 @@ def initialize_state() -> None:
                 holding.setdefault("quantity", None)
                 holding["symbol"] = normalized_symbol
 
-                # Preserve ID-style keys when already migrated; otherwise generate a new lot ID.
-                if "symbol" in raw_holding and str(raw_key) not in normalized_holdings:
-                    holding_id = str(raw_key)
+                raw_key_str = str(raw_key)
+                base_symbol = _symbol_from_holding_key(raw_key_str)
+                _, _, suffix = raw_key_str.rpartition("__")
+                is_valid_lot_id = bool(base_symbol and _looks_like_ticker_symbol(base_symbol) and suffix.isdigit())
+
+                # Preserve only real lot IDs like AAPL__1; remap everything else.
+                if is_valid_lot_id and raw_key_str not in normalized_holdings:
+                    holding_id = raw_key_str
                 else:
                     holding_id = _next_holding_id(normalized_symbol, set(normalized_holdings.keys()))
 
@@ -996,6 +1004,19 @@ def _next_holding_id(symbol: str, existing_ids: set[str]) -> str:
         index += 1
         candidate = f"{base}{index}"
     return candidate
+
+
+def _symbol_from_holding_key(raw_key: Any) -> str:
+    raw_key_str = str(raw_key or "")
+    if "__" in raw_key_str:
+        base, _, suffix = raw_key_str.rpartition("__")
+        if suffix.isdigit():
+            return sanitize_symbol(base)
+    return sanitize_symbol(raw_key_str)
+
+
+def _looks_like_ticker_symbol(symbol: str) -> bool:
+    return any(ch.isalpha() for ch in symbol)
 
 
 def parse_optional_price(value: str) -> float | None:
